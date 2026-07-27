@@ -33,7 +33,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./lib/api";
 import type {
   AuditRecord,
@@ -47,6 +47,7 @@ import type {
 } from "./types";
 
 type View = "setup" | "repositories" | "new-audit" | "workspace" | "settings";
+type PickerIssue = { source: "saved" | "path"; message: string };
 
 const PROJECTS_STORAGE_KEY = "perfora.projects";
 
@@ -65,10 +66,36 @@ const providerDescriptions: Record<ProviderId, string> = {
 function loadSavedProjects(): RepositorySnapshot[] {
   try {
     const saved = window.localStorage.getItem(PROJECTS_STORAGE_KEY);
-    return saved ? (JSON.parse(saved) as RepositorySnapshot[]) : [];
+    const parsed: unknown = saved ? JSON.parse(saved) : [];
+    if (!Array.isArray(parsed)) return [];
+    const seenPaths = new Set<string>();
+    return parsed.filter((value): value is RepositorySnapshot => {
+      if (!value || typeof value !== "object") return false;
+      const project = value as Partial<RepositorySnapshot>;
+      if (
+        typeof project.path !== "string"
+        || !project.path.trim()
+        || typeof project.name !== "string"
+        || typeof project.valid !== "boolean"
+        || typeof project.detail !== "string"
+        || typeof project.is_flutter !== "boolean"
+        || typeof project.is_git !== "boolean"
+        || !Array.isArray(project.packages)
+        || seenPaths.has(project.path)
+      ) {
+        return false;
+      }
+      seenPaths.add(project.path);
+      return true;
+    });
   } catch {
     return [];
   }
+}
+
+function requireValidRepository(repository: RepositorySnapshot) {
+  if (!repository.valid) throw new Error(repository.detail);
+  return repository;
 }
 
 function App() {
@@ -77,9 +104,7 @@ function App() {
   const [setupLoading, setSetupLoading] = useState(true);
   const [setupError, setSetupError] = useState("");
   const [projects, setProjects] = useState<RepositorySnapshot[]>(loadSavedProjects);
-  const [repository, setRepository] = useState<RepositorySnapshot | null>(
-    () => loadSavedProjects()[0] ?? null,
-  );
+  const [repository, setRepository] = useState<RepositorySnapshot | null>(null);
   const [audits, setAudits] = useState<AuditRecord[]>([]);
   const [activeAudit, setActiveAudit] = useState<AuditRecord | null>(null);
 
@@ -110,6 +135,13 @@ function App() {
       ...currentProjects.filter((savedProject) => savedProject.path !== project.path),
     ]);
     setRepository(project);
+  };
+
+  const removeProject = (path: string) => {
+    setProjects((currentProjects) =>
+      currentProjects.filter((savedProject) => savedProject.path !== path),
+    );
+    if (repository?.path === path) setRepository(null);
   };
 
   const refreshAudit = useCallback(async (auditId: string) => {
@@ -162,7 +194,7 @@ function App() {
               projects={projects}
               audits={audits}
               onValidated={saveProject}
-              onSelect={setRepository}
+              onRemove={removeProject}
               onNewAudit={() => setView("new-audit")}
               onOpenAudit={openAudit}
             />
@@ -172,7 +204,7 @@ function App() {
               repository={repository}
               projects={projects}
               catalogs={setup?.providers ?? []}
-              onSelectRepository={setRepository}
+              onSelectRepository={saveProject}
               onBack={() => setView("repositories")}
               onCreated={(audit) => {
                 setActiveAudit(audit);
@@ -206,7 +238,7 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
   ];
   return (
     <aside className="sidebar">
-      <button className="brand" onClick={() => onNavigate("setup")}>
+      <button className="brand" onClick={() => onNavigate("setup")} aria-label="Perfora home">
         <img className="brand-mark" src="/perfora-mark.svg" alt="" />
         <span>
           <strong>Perfora</strong>
@@ -220,6 +252,7 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
             key={id}
             className={view === id ? "nav-item active" : "nav-item"}
             onClick={() => onNavigate(id)}
+            aria-label={label}
           >
             <Icon size={18} />
             <span>{label}</span>
@@ -238,6 +271,7 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
       <button
         className={view === "settings" ? "nav-item active" : "nav-item"}
         onClick={() => onNavigate("settings")}
+        aria-label="Settings"
       >
         <Settings size={18} /> Settings
       </button>
@@ -373,7 +407,7 @@ function RepositoriesView({
   projects,
   audits,
   onValidated,
-  onSelect,
+  onRemove,
   onNewAudit,
   onOpenAudit,
 }: {
@@ -381,36 +415,80 @@ function RepositoriesView({
   projects: RepositorySnapshot[];
   audits: AuditRecord[];
   onValidated: (repository: RepositorySnapshot) => void;
-  onSelect: (repository: RepositorySnapshot) => void;
+  onRemove: (path: string) => void;
   onNewAudit: () => void;
   onOpenAudit: (audit: AuditRecord) => void;
 }) {
   const [path, setPath] = useState(repository?.path ?? "");
-  const [loadingAction, setLoadingAction] = useState<"browse" | "path" | null>(null);
-  const [error, setError] = useState("");
+  const [savedPath, setSavedPath] = useState(repository?.path ?? "");
+  const [loadingAction, setLoadingAction] = useState<"browse" | "path" | "saved" | null>(null);
+  const [issue, setIssue] = useState<PickerIssue | null>(null);
+  const pathValidationVersion = useRef(0);
   const acceptProject = (selectedProject: RepositorySnapshot) => {
-    setPath(selectedProject.path);
-    if (!selectedProject.valid) throw new Error(selectedProject.detail);
-    onValidated(selectedProject);
+    const validRepository = requireValidRepository(selectedProject);
+    setPath(validRepository.path);
+    setSavedPath(validRepository.path);
+    setIssue(null);
+    onValidated(validRepository);
+  };
+  const selectSaved = async (selectedPath: string) => {
+    setSavedPath(selectedPath);
+    setIssue(null);
+    if (!selectedPath) return;
+    setLoadingAction("saved");
+    try {
+      acceptProject(await api.validateRepository(selectedPath));
+    } catch (reason) {
+      setIssue({
+        source: "saved",
+        message: reason instanceof Error ? reason.message : "Saved project validation failed",
+      });
+    } finally {
+      setLoadingAction(null);
+    }
+  };
+  const removeSaved = () => {
+    if (!savedPath) return;
+    onRemove(savedPath);
+    if (path === savedPath) setPath("");
+    setSavedPath("");
+    setIssue(null);
   };
   const validate = async () => {
+    const validationVersion = ++pathValidationVersion.current;
     setLoadingAction("path");
-    setError("");
+    setIssue(null);
     try {
-      acceptProject(await api.validateRepository(path.trim()));
+      const selectedProject = await api.validateRepository(path.trim());
+      if (validationVersion !== pathValidationVersion.current) return;
+      acceptProject(selectedProject);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Repository validation failed");
+      if (validationVersion !== pathValidationVersion.current) return;
+      setIssue({
+        source: "path",
+        message: reason instanceof Error ? reason.message : "Repository validation failed",
+      });
     } finally {
       setLoadingAction(null);
     }
   };
   const browse = async () => {
+    const validationVersion = ++pathValidationVersion.current;
     setLoadingAction("browse");
-    setError("");
+    setIssue(null);
     try {
-      acceptProject(await api.pickRepository());
+      const selectedProject = await api.pickRepository();
+      if (validationVersion !== pathValidationVersion.current) return;
+      acceptProject(selectedProject);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Folder selection failed");
+      if (validationVersion !== pathValidationVersion.current) return;
+      if (reason instanceof Error && reason.message === "Folder selection was cancelled") {
+        return;
+      }
+      setIssue({
+        source: "path",
+        message: reason instanceof Error ? reason.message : "Folder selection failed",
+      });
     } finally {
       setLoadingAction(null);
     }
@@ -420,56 +498,104 @@ function RepositoriesView({
       <PageHeading eyebrow="Source context" title="Connect a local Flutter repository." description="Perfora records the exact branch, commit, SDK context, and package fingerprint behind every finding." />
       <div className="repo-connect">
         <div className="connect-icon"><FolderOpen size={28} /></div>
-        <div className="connect-copy"><strong>Project picker</strong><span>Select a saved project or add its static absolute path.</span></div>
+        <div className="connect-copy"><strong>Project picker</strong><span>Choose a saved project or add a local path. Perfora verifies it before use.</span></div>
         <div className="project-picker">
-          <label>
-            Saved projects
-            <select
-              value={repository?.path ?? ""}
-              onChange={(event) => {
-                const selectedProject = projects.find(
-                  (project) => project.path === event.target.value,
-                );
-                if (selectedProject) {
-                  setPath(selectedProject.path);
-                  onSelect(selectedProject);
-                }
+          <div className="picker-field-group">
+            <div className="saved-project-control">
+              <label>
+                Saved projects
+                <select
+                  value={savedPath}
+                  onChange={(event) => void selectSaved(event.target.value)}
+                  disabled={projects.length === 0 || loadingAction !== null}
+                >
+                  <option value="">{projects.length ? "Choose a project" : "No saved projects yet"}</option>
+                  {projects.map((project) => (
+                    <option key={project.path} value={project.path}>
+                      {project.name} — {project.path}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="button secondary saved-project-action"
+                onClick={() => void selectSaved(savedPath)}
+                disabled={!savedPath || loadingAction !== null}
+                aria-label="Recheck saved project"
+                title="Recheck saved project"
+              >
+                {loadingAction === "saved"
+                  ? <LoaderCircle className="spin" size={15} />
+                  : <RefreshCw size={15} />}
+                Check
+              </button>
+              <button
+                className="button secondary saved-project-action remove-project"
+                onClick={removeSaved}
+                disabled={!savedPath || loadingAction !== null}
+                aria-label="Remove saved project"
+              >
+                <X size={15} /> Remove
+              </button>
+            </div>
+            {issue?.source === "saved" && (
+              <p className="field-error" role="alert" data-source="saved">
+                <CircleAlert size={15} /> {issue.message}
+              </p>
+            )}
+            {issue?.source !== "saved" && (
+              <p className="picker-hint"><ShieldCheck size={14} /> Saved paths are rechecked before activation.</p>
+            )}
+          </div>
+          <div className="picker-field-group">
+            <form
+              className="path-input"
+              aria-label="Add project by path"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (path.trim() && loadingAction === null) void validate();
               }}
-              disabled={projects.length === 0}
             >
-              <option value="">{projects.length ? "Choose a project" : "No saved projects yet"}</option>
-              {projects.map((project) => (
-                <option key={project.path} value={project.path}>
-                  {project.name} — {project.path}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="path-input">
-            <input
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              placeholder="/Users/you/projects/flutter_app"
-              aria-label="Static project path"
-            />
-            <button
-              className="button secondary"
-              onClick={browse}
-              disabled={loadingAction !== null}
-            >
-              {loadingAction === "browse" ? <LoaderCircle className="spin" /> : <FolderOpen />}
-              Browse…
-            </button>
-            <button
-              className="button primary"
-              onClick={validate}
-              disabled={!path.trim() || loadingAction !== null}
-            >
-              {loadingAction === "path" ? <LoaderCircle className="spin" /> : <Plus />} Add path
-            </button>
+              <label>
+                Project path
+                <input
+                  value={path}
+                  onChange={(event) => {
+                    pathValidationVersion.current += 1;
+                    setPath(event.target.value);
+                    if (issue?.source === "path") setIssue(null);
+                  }}
+                  placeholder="/Users/you/projects/flutter_app"
+                  aria-label="Static project path"
+                />
+              </label>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={browse}
+                disabled={loadingAction !== null}
+              >
+                {loadingAction === "browse" ? <LoaderCircle className="spin" /> : <FolderOpen />}
+                Browse…
+              </button>
+              <button
+                type="submit"
+                className="button primary"
+                disabled={!path.trim() || loadingAction !== null}
+              >
+                {loadingAction === "path" ? <LoaderCircle className="spin" /> : <Plus />} Add path
+              </button>
+            </form>
+            {issue?.source === "path" && (
+              <p className="field-error" role="alert" data-source="path">
+                <CircleAlert size={15} /> {issue.message}
+              </p>
+            )}
+            {issue?.source !== "path" && (
+              <p className="picker-hint"><FolderOpen size={14} /> Paste an absolute path, quoted path, or file:// URL.</p>
+            )}
           </div>
         </div>
-        {error && <p className="field-error"><CircleAlert size={15} /> {error}</p>}
       </div>
       {repository && (
         <article className="repository-card">
@@ -537,7 +663,22 @@ function NewAuditView({
   const [consent, setConsent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [repositoryLoading, setRepositoryLoading] = useState(false);
+  const [repositoryError, setRepositoryError] = useState("");
   const isRemote = selected ? selected.locality !== "local" : false;
+  const selectRepository = async (path: string) => {
+    setRepositoryLoading(true);
+    setRepositoryError("");
+    try {
+      onSelectRepository(requireValidRepository(await api.validateRepository(path)));
+    } catch (reason) {
+      setRepositoryError(
+        reason instanceof Error ? reason.message : "Repository validation failed",
+      );
+    } finally {
+      setRepositoryLoading(false);
+    }
+  };
   const create = async () => {
     if (!repository || !selected) return;
     setLoading(true);
@@ -566,12 +707,8 @@ function NewAuditView({
             Project
             <select
               value={repository.path}
-              onChange={(event) => {
-                const selectedProject = projects.find(
-                  (project) => project.path === event.target.value,
-                );
-                if (selectedProject) onSelectRepository(selectedProject);
-              }}
+              onChange={(event) => void selectRepository(event.target.value)}
+              disabled={repositoryLoading}
             >
               {projects.map((project) => (
                 <option key={project.path} value={project.path}>
@@ -580,6 +717,11 @@ function NewAuditView({
               ))}
             </select>
           </label>
+          {repositoryError && (
+            <p className="field-error" role="alert" data-source="audit-project">
+              <CircleAlert size={15} /> {repositoryError}
+            </p>
+          )}
           <div className="selection-card"><FolderGit2 /><div><strong>{repository.name}</strong><code>{repository.path}</code></div><div className="selection-meta"><span>{repository.branch || "no branch"}</span><span>{repository.commit_sha?.slice(0, 8) || "no commit"}</span></div></div>
         </div>
       </div>

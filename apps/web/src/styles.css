@@ -146,14 +146,20 @@ code, pre { font-family: "JetBrains Mono", monospace; }
 .connect-copy strong, .connect-copy span { display: block; }
 .connect-copy strong { font-size: 13px; }
 .connect-copy span { margin-top: 4px; color: var(--muted); font-size: 10px; }
-.path-input { display: grid; grid-template-columns: minmax(150px, 1fr) auto auto; gap: 8px; min-width: 0; }
+.path-input { display: grid; grid-template-columns: minmax(150px, 1fr) auto auto; gap: 8px; align-items: end; min-width: 0; }
 .path-input input { min-width: 0; height: 43px; padding: 0 13px; border: 1px solid var(--line); border-radius: 9px; outline: 0; background: white; font-family: "JetBrains Mono"; font-size: 11px; }
 .path-input input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(20,125,100,.09); }
 .project-picker { display: grid; grid-template-columns: minmax(190px, .7fr) minmax(280px, 1.3fr); gap: 9px; min-width: 0; }
-.project-picker > label { display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: 9px; font-weight: 700; }
+.picker-field-group { display: grid; align-content: start; gap: 6px; min-width: 0; }
+.picker-field-group label { display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: 9px; font-weight: 700; }
+.saved-project-control { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: end; min-width: 0; }
+.saved-project-action { height: 43px; padding-inline: 10px; }
+.remove-project { color: var(--red); }
 .project-picker select { min-width: 0; height: 43px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; outline: 0; color: var(--ink); background: white; font-size: 10px; }
 .project-picker select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(20,125,100,.09); }
-.field-error { grid-column: 3; display: flex; align-items: center; gap: 5px; margin: -4px 0 0; color: var(--red); font-size: 10px; }
+.field-error { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--red); font-size: 10px; }
+.picker-hint { display: flex; align-items: center; gap: 5px; margin: 0; color: #7b8985; font-size: 9px; }
+.picker-hint svg { flex: none; color: var(--green); }
 .repository-card { position: relative; margin-top: 20px; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: white; box-shadow: var(--shadow); }
 .repo-accent { position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--green); }
 .repo-main { display: flex; align-items: center; gap: 14px; padding: 22px 25px 18px; }
@@ -333,13 +339,17 @@ code, pre { font-family: "JetBrains Mono", monospace; }
 .empty-state h2 { margin: 15px 0 5px; font: 700 17px "Manrope"; }
 .empty-state p { margin: 0 0 16px; color: var(--muted); font-size: 11px; }
 
+@media (max-width: 1400px) {
+  .repo-connect { grid-template-columns: 48px 1fr; }
+  .project-picker { grid-column: 1 / -1; }
+}
+
 @media (max-width: 1100px) {
   .sidebar { width: 214px; }
   .main-shell { margin-left: 214px; }
   .tool-grid { grid-template-columns: repeat(3, 1fr); }
   .hero-grid, .settings-grid { grid-template-columns: 1fr; }
-  .repo-connect { grid-template-columns: 48px 1fr; }
-  .project-picker, .field-error { grid-column: 1 / -1; }
+  .field-error { grid-column: 1 / -1; }
 }
 
 @media (max-width: 780px) {
@@ -356,6 +366,7 @@ code, pre { font-family: "JetBrains Mono", monospace; }
   .tool-grid, .provider-grid, .repo-stats, .evidence-summary { grid-template-columns: 1fr 1fr; }
   .project-picker, .model-choice, .model-provider-picker { grid-template-columns: 1fr; }
   .path-input { grid-template-columns: 1fr; }
+  .saved-project-control { grid-template-columns: minmax(0, 1fr) auto auto; }
   .investigation-grid { grid-template-columns: 1fr; }
   .audit-row { grid-template-columns: 34px 1fr 80px 18px; }
   .audit-row > span:nth-child(3), .audit-row > span:nth-child(4) { display: none; }

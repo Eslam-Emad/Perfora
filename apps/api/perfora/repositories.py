@@ -4,6 +4,7 @@ import hashlib
 import shutil
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from .domain import RepositorySnapshot
 from .process import ProcessError, run_process
@@ -23,10 +24,20 @@ class RepositoryPickerCancelled(RepositoryPickerError):
 
 
 def _safe_resolve(raw_path: str) -> Path:
-    path = Path(raw_path).expanduser().resolve()
+    candidate = raw_path.strip()
+    if not candidate:
+        raise ValueError("Repository path is required")
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {'"', "'"}:
+        candidate = candidate[1:-1].strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme == "file":
+        if parsed.netloc not in {"", "localhost"}:
+            raise ValueError("Repository file URL must point to this computer")
+        candidate = unquote(parsed.path)
+    path = Path(candidate).expanduser()
     if not path.is_absolute():
         raise ValueError("Repository path must be absolute")
-    return path
+    return path.resolve()
 
 
 async def pick_repository_path() -> str:

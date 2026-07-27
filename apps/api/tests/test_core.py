@@ -45,6 +45,50 @@ async def test_validates_flutter_repository(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejects_an_empty_repository_path_without_using_the_server_cwd() -> None:
+    result = await inspect_repository("   ")
+
+    assert result.valid is False
+    assert result.path == "   "
+    assert result.detail == "Repository path is required"
+
+
+@pytest.mark.asyncio
+async def test_rejects_a_relative_repository_path() -> None:
+    result = await inspect_repository("projects/sample_flutter")
+
+    assert result.valid is False
+    assert result.path == "projects/sample_flutter"
+    assert result.detail == "Repository path must be absolute"
+
+
+@pytest.mark.asyncio
+async def test_accepts_a_file_url_pasted_from_the_desktop(tmp_path: Path) -> None:
+    project = tmp_path / "Flutter Project"
+    project.mkdir()
+    (project / "pubspec.yaml").write_text(
+        "name: sample\ndependencies:\n  flutter:\n    sdk: flutter\n"
+    )
+
+    result = await inspect_repository(project.as_uri())
+
+    assert result.valid is True
+    assert result.path == str(project)
+
+
+@pytest.mark.asyncio
+async def test_accepts_an_absolute_path_wrapped_in_quotes(tmp_path: Path) -> None:
+    (tmp_path / "pubspec.yaml").write_text(
+        "name: sample\ndependencies:\n  flutter:\n    sdk: flutter\n"
+    )
+
+    result = await inspect_repository(f'"{tmp_path}"')
+
+    assert result.valid is True
+    assert result.path == str(tmp_path)
+
+
+@pytest.mark.asyncio
 async def test_native_picker_returns_selected_macos_path(monkeypatch) -> None:
     async def choose_folder(command, **_):
         assert command[0] == "osascript"
@@ -56,6 +100,18 @@ async def test_native_picker_returns_selected_macos_path(monkeypatch) -> None:
     selected_path = await pick_repository_path()
 
     assert selected_path == "/Users/islam/projects/flutter_app"
+
+
+@pytest.mark.asyncio
+async def test_native_picker_reports_cancellation_without_a_generic_failure(monkeypatch) -> None:
+    async def cancel_folder_selection(*_args, **_kwargs):
+        raise repositories.ProcessError(["osascript"], 1, "User canceled. (-128)")
+
+    monkeypatch.setattr(repositories.sys, "platform", "darwin")
+    monkeypatch.setattr(repositories, "run_process", cancel_folder_selection)
+
+    with pytest.raises(repositories.RepositoryPickerCancelled, match="selection was cancelled"):
+        await pick_repository_path()
 
 
 def test_redacts_likely_secrets() -> None:
