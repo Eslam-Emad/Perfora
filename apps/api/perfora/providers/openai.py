@@ -55,8 +55,8 @@ class OpenAIAdapter(ProviderAdapter):
                 )
                 response.raise_for_status()
             models = []
-            for item in response.json().get("data", []):
-                model_id = str(item.get("id", ""))
+            for model_payload in response.json().get("data", []):
+                model_id = str(model_payload.get("id", ""))
                 compatible = model_id.startswith(TEXT_MODEL_PREFIXES) and not any(
                     marker in model_id.lower() for marker in NON_TEXT_MARKERS
                 )
@@ -69,8 +69,8 @@ class OpenAIAdapter(ProviderAdapter):
                         capability_status="compatible" if compatible else "unknown",
                         locality="remote",
                         metadata={
-                            "owned_by": item.get("owned_by"),
-                            "created": item.get("created"),
+                            "owned_by": model_payload.get("owned_by"),
+                            "created": model_payload.get("created"),
                         },
                     )
                 )

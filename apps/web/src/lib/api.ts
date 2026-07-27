@@ -26,15 +26,21 @@ export const api = {
   setup: () => request<SetupStatus>("/api/setup"),
   models: () =>
     request<{ providers: ProviderCatalog[] }>("/api/providers/models").then(
-      (result) => result.providers,
+      (catalogResponse) => catalogResponse.providers,
     ),
+  pickRepository: () =>
+    request<RepositorySnapshot>("/api/repositories/pick", {
+      method: "POST",
+    }),
   validateRepository: (path: string) =>
     request<RepositorySnapshot>("/api/repositories/validate", {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
   listAudits: () =>
-    request<{ audits: AuditRecord[] }>("/api/audits").then((result) => result.audits),
+    request<{ audits: AuditRecord[] }>("/api/audits").then(
+      (auditResponse) => auditResponse.audits,
+    ),
   getAudit: (id: string) => request<AuditRecord>(`/api/audits/${id}`),
   createAudit: (input: {
     repository_path: string;
@@ -70,4 +76,3 @@ export const api = {
       method: "POST",
     }),
 };
-

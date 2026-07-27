@@ -37,9 +37,7 @@ class OpenCodeAdapter(ProviderAdapter):
                     provider=self.id,
                     id=line.strip(),
                     label=line.strip(),
-                    compatible=not any(
-                        marker in line.lower() for marker in unsupported_markers
-                    ),
+                    compatible=not any(marker in line.lower() for marker in unsupported_markers),
                     capability_status=(
                         "unsupported"
                         if any(marker in line.lower() for marker in unsupported_markers)

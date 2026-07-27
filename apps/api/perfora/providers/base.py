@@ -6,6 +6,10 @@ from typing import Any
 from ..domain import ProviderCatalog, ProviderId
 
 
+class ProviderRequestError(RuntimeError):
+    """Sanitized provider failure safe to expose through the local API."""
+
+
 class ProviderAdapter(ABC):
     id: ProviderId
     locality: str

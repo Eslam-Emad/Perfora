@@ -45,7 +45,10 @@ class FixService:
         audit = self.store.get(audit_id)
         if not audit:
             raise KeyError(audit_id)
-        finding = next((item for item in audit.findings if item.id == finding_id), None)
+        finding = next(
+            (audit_finding for audit_finding in audit.findings if audit_finding.id == finding_id),
+            None,
+        )
         if not finding:
             raise KeyError(finding_id)
         repository = Path(audit.repository.path).resolve()
@@ -69,18 +72,24 @@ SOURCE {finding.file}
 {source}
 """
         )
-        result = await self.providers.generate_json(
+        fix_response = await self.providers.generate_json(
             ProviderId(audit.provider), audit.model_id, prompt, FIX_SCHEMA
         )
-        patch = result["patch"].strip()
+        patch = fix_response["patch"].strip()
         self._validate_patch(repository, patch, allowed_file=finding.file)
+        try:
+            await self._check_patch(repository, patch)
+        except ProcessError as error:
+            raise FixSafetyError(
+                "The generated patch does not apply cleanly to the recorded source"
+            ) from error
         finding.fix_status = "generated"
         self.store.save(audit)
         return FixProposal(
             finding_id=finding.id,
             audit_id=audit.id,
-            summary=result["summary"],
-            risk=result["risk"],
+            summary=fix_response["summary"],
+            risk=fix_response["risk"],
             patch=patch,
             expected_head=head,
         )
@@ -93,7 +102,10 @@ SOURCE {finding.file}
         audit = self.store.get(audit_id)
         if not audit:
             raise KeyError(audit_id)
-        finding = next((item for item in audit.findings if item.id == finding_id), None)
+        finding = next(
+            (audit_finding for audit_finding in audit.findings if audit_finding.id == finding_id),
+            None,
+        )
         if not finding:
             raise KeyError(finding_id)
         repository = Path(audit.repository.path).resolve()
@@ -104,14 +116,17 @@ SOURCE {finding.file}
         if status:
             raise FixSafetyError("Apply Fix requires a clean Git worktree")
         self._validate_patch(repository, request.patch, allowed_file=finding.file)
-        branch = f"perfora/fix-{finding.id[:8]}"
-        await run_process(["git", "switch", "-c", branch], cwd=repository, timeout=15)
         try:
-            await self._apply_patch(repository, request.patch, check=True)
-            await self._apply_patch(repository, request.patch, check=False)
-        except Exception:
-            await run_process(["git", "switch", "-"], cwd=repository, timeout=15)
-            raise
+            await self._check_patch(repository, request.patch)
+        except ProcessError as error:
+            raise FixSafetyError("The approved patch no longer applies cleanly") from error
+        branch = f"perfora/fix-{finding.id[:8]}"
+        try:
+            await run_process(["git", "switch", "-c", branch], cwd=repository, timeout=15)
+            await self._apply_patch(repository, request.patch)
+        except ProcessError as error:
+            await self._remove_failed_branch(repository, branch)
+            raise FixSafetyError("The approved patch could not be applied") from error
 
         diff = await run_process(["git", "diff", "--binary"], cwd=repository, timeout=15)
         self._reverse_patches[finding.id] = diff
@@ -150,18 +165,21 @@ SOURCE {finding.file}
         audit = self.store.get(audit_id)
         if not audit:
             raise KeyError(audit_id)
-        finding = next((item for item in audit.findings if item.id == finding_id), None)
+        finding = next(
+            (audit_finding for audit_finding in audit.findings if audit_finding.id == finding_id),
+            None,
+        )
         if not finding:
             raise KeyError(finding_id)
         repository = Path(audit.repository.path).resolve()
         patch = self._reverse_patches.get(finding.id)
         if not patch:
             raise FixSafetyError("No rollback patch is available in this session")
-        with tempfile.NamedTemporaryFile("w", suffix=".patch") as handle:
-            handle.write(patch)
-            handle.flush()
+        with tempfile.NamedTemporaryFile("w", suffix=".patch") as patch_file:
+            patch_file.write(patch if patch.endswith("\n") else f"{patch}\n")
+            patch_file.flush()
             await run_process(
-                ["git", "apply", "--reverse", handle.name], cwd=repository, timeout=30
+                ["git", "apply", "--reverse", patch_file.name], cwd=repository, timeout=30
             )
         finding.fix_status = "rolled_back"
         self.store.save(audit)
@@ -170,15 +188,25 @@ SOURCE {finding.file}
     async def _head(self, repository: Path) -> str:
         return await run_process(["git", "rev-parse", "HEAD"], cwd=repository, timeout=10)
 
-    async def _apply_patch(self, repository: Path, patch: str, *, check: bool) -> None:
-        with tempfile.NamedTemporaryFile("w", suffix=".patch") as handle:
-            handle.write(patch)
-            handle.flush()
-            command = ["git", "apply"]
-            if check:
-                command.append("--check")
-            command.append(handle.name)
-            await run_process(command, cwd=repository, timeout=30)
+    async def _remove_failed_branch(self, repository: Path, branch: str) -> None:
+        current = await run_process(["git", "branch", "--show-current"], cwd=repository, timeout=10)
+        if current == branch:
+            await run_process(["git", "switch", "-"], cwd=repository, timeout=15)
+        branches = await run_process(["git", "branch", "--list", branch], cwd=repository)
+        if branches:
+            await run_process(["git", "branch", "-D", branch], cwd=repository, timeout=15)
+
+    async def _check_patch(self, repository: Path, patch: str) -> None:
+        await self._run_patch_command(repository, patch, ["git", "apply", "--check"])
+
+    async def _apply_patch(self, repository: Path, patch: str) -> None:
+        await self._run_patch_command(repository, patch, ["git", "apply"])
+
+    async def _run_patch_command(self, repository: Path, patch: str, command: list[str]) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".patch") as patch_file:
+            patch_file.write(patch if patch.endswith("\n") else f"{patch}\n")
+            patch_file.flush()
+            await run_process([*command, patch_file.name], cwd=repository, timeout=30)
 
     def _validate_patch(self, repository: Path, patch: str, *, allowed_file: str) -> None:
         paths = DIFF_PATH.findall(patch)

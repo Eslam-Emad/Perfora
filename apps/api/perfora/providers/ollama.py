@@ -25,23 +25,21 @@ class OllamaAdapter(ProviderAdapter):
             models = [
                 ModelInfo(
                     provider=self.id,
-                    id=item["name"],
-                    label=item.get("model") or item["name"],
-                    compatible="embed" not in item["name"].lower(),
+                    id=model_payload["name"],
+                    label=model_payload.get("model") or model_payload["name"],
+                    compatible="embed" not in model_payload["name"].lower(),
                     capability_status=(
-                        "unsupported"
-                        if "embed" in item["name"].lower()
-                        else "unknown"
+                        "unsupported" if "embed" in model_payload["name"].lower() else "unknown"
                     ),
-                    locality="remote" if ":cloud" in item["name"] else "local",
+                    locality="remote" if ":cloud" in model_payload["name"] else "local",
                     metadata={
-                        "size": item.get("size"),
-                        "modified_at": item.get("modified_at"),
-                        "details": item.get("details", {}),
+                        "size": model_payload.get("size"),
+                        "modified_at": model_payload.get("modified_at"),
+                        "details": model_payload.get("details", {}),
                     },
                 )
-                for item in response.json().get("models", [])
-                if item.get("name")
+                for model_payload in response.json().get("models", [])
+                if model_payload.get("name")
             ]
             return ProviderCatalog(
                 provider=self.id,
@@ -59,7 +57,7 @@ class OllamaAdapter(ProviderAdapter):
     async def generate_json(
         self, model_id: str, prompt: str, schema: dict[str, Any]
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             response = await client.post(
                 f"{self.settings.ollama_base_url}/api/generate",
                 json={
@@ -68,7 +66,11 @@ class OllamaAdapter(ProviderAdapter):
                     "stream": False,
                     "think": False,
                     "format": schema,
-                    "options": {"temperature": 0},
+                    "options": {
+                        "temperature": 0,
+                        "num_ctx": 8192,
+                        "num_predict": 1400,
+                    },
                 },
             )
             response.raise_for_status()

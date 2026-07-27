@@ -3,19 +3,22 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from perfora import repositories
 from perfora.config import Settings
 from perfora.database import AuditStore
 from perfora.domain import (
     AuditRecord,
     Finding,
+    FixApplyRequest,
     ProviderId,
     RepositorySnapshot,
 )
 from perfora.exports import export_html, export_sarif
 from perfora.fixes import FixSafetyError, FixService
 from perfora.main import app
+from perfora.process import run_process
 from perfora.providers import ProviderRegistry
-from perfora.repositories import inspect_repository
+from perfora.repositories import inspect_repository, pick_repository_path
 from perfora.security import redact_secrets
 
 
@@ -41,6 +44,20 @@ async def test_validates_flutter_repository(tmp_path: Path) -> None:
     assert result.fingerprint
 
 
+@pytest.mark.asyncio
+async def test_native_picker_returns_selected_macos_path(monkeypatch) -> None:
+    async def choose_folder(command, **_):
+        assert command[0] == "osascript"
+        return "/Users/islam/projects/flutter_app/"
+
+    monkeypatch.setattr(repositories.sys, "platform", "darwin")
+    monkeypatch.setattr(repositories, "run_process", choose_folder)
+
+    selected_path = await pick_repository_path()
+
+    assert selected_path == "/Users/islam/projects/flutter_app"
+
+
 def test_redacts_likely_secrets() -> None:
     source = 'const apiKey = "sk-example012345678901234567890";'
 
@@ -62,7 +79,7 @@ def test_exports_evidence_as_html_and_sarif(tmp_path: Path) -> None:
 
 
 def test_rejects_patch_outside_approved_file(tmp_path: Path) -> None:
-    settings = Settings(database_path=tmp_path / "test.db")
+    settings = Settings(database_path=tmp_path.parent / f"{tmp_path.name}.db")
     service = FixService(AuditStore(settings.database_path), ProviderRegistry(settings))
     patch = """diff --git a/lib/other.dart b/lib/other.dart
 --- a/lib/other.dart
@@ -74,6 +91,61 @@ def test_rejects_patch_outside_approved_file(tmp_path: Path) -> None:
 
     with pytest.raises(FixSafetyError, match="outside the approved finding"):
         service._validate_patch(tmp_path, patch, allowed_file="lib/controller.dart")
+
+
+@pytest.mark.asyncio
+async def test_applies_and_rolls_back_reviewed_patch(tmp_path: Path) -> None:
+    source = tmp_path / "lib" / "controller.dart"
+    source.parent.mkdir()
+    source.write_text("final value = 1;\n")
+    await run_process(["git", "init", "-q"], cwd=tmp_path)
+    await run_process(["git", "add", "."], cwd=tmp_path)
+    await run_process(
+        [
+            "git",
+            "-c",
+            "user.name=Perfora Test",
+            "-c",
+            "user.email=perfora@test.local",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+        cwd=tmp_path,
+    )
+    head = await run_process(["git", "rev-parse", "HEAD"], cwd=tmp_path)
+    settings = Settings(database_path=tmp_path.parent / f"{tmp_path.name}.db")
+    store = AuditStore(settings.database_path)
+    audit = _audit(tmp_path)
+    store.save(audit)
+    service = FixService(store, ProviderRegistry(settings))
+    patch = """diff --git a/lib/controller.dart b/lib/controller.dart
+--- a/lib/controller.dart
++++ b/lib/controller.dart
+@@ -1 +1 @@
+-final value = 1;
++final value = 2;
+"""
+
+    result = await service.apply(
+        audit.id,
+        audit.findings[0].id,
+        FixApplyRequest(
+            approved=True,
+            expected_head=head,
+            patch=patch,
+            verification_commands=[],
+        ),
+    )
+    assert result.applied is True
+    assert result.branch.startswith("perfora/fix-")
+    assert source.read_text() == "final value = 2;\n"
+
+    rollback = await service.rollback(audit.id, audit.findings[0].id)
+
+    assert rollback["rolled_back"] is True
+    assert source.read_text() == "final value = 1;\n"
 
 
 def _audit(repository: Path) -> AuditRecord:
@@ -108,4 +180,3 @@ def _audit(repository: Path) -> AuditRecord:
         )
     )
     return audit
-

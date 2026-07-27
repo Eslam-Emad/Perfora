@@ -15,8 +15,13 @@ from .database import AuditStore
 from .domain import AuditCreate, FixApplyRequest, RepositoryRequest
 from .exports import export_html, export_json, export_sarif
 from .fixes import FixSafetyError, FixService
-from .providers import ProviderRegistry
-from .repositories import inspect_repository
+from .providers import ProviderRegistry, ProviderRequestError
+from .repositories import (
+    RepositoryPickerCancelled,
+    RepositoryPickerError,
+    inspect_repository,
+    pick_repository_path,
+)
 from .setup import tool_health
 
 store = AuditStore(settings.database_path)
@@ -63,6 +68,17 @@ async def validate_repository(request: RepositoryRequest):
     return await inspect_repository(request.path)
 
 
+@app.post("/api/repositories/pick")
+async def pick_repository():
+    try:
+        selected_path = await pick_repository_path()
+    except RepositoryPickerCancelled as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except RepositoryPickerError as error:
+        raise HTTPException(status_code=501, detail=str(error)) from None
+    return await inspect_repository(selected_path)
+
+
 @app.get("/api/audits")
 async def list_audits() -> dict:
     return {"audits": store.list()}
@@ -74,9 +90,20 @@ async def create_audit(request: AuditCreate):
     if not repository.valid:
         raise HTTPException(status_code=422, detail=repository.detail)
     catalogs = await providers.catalogs()
-    catalog = next((item for item in catalogs if item.provider == request.provider), None)
+    catalog = next(
+        (
+            provider_catalog
+            for provider_catalog in catalogs
+            if provider_catalog.provider == request.provider
+        ),
+        None,
+    )
     model = next(
-        (item for item in (catalog.models if catalog else []) if item.id == request.model_id),
+        (
+            available_model
+            for available_model in (catalog.models if catalog else [])
+            if available_model.id == request.model_id
+        ),
         None,
     )
     if not catalog or not catalog.available:
@@ -141,6 +168,8 @@ async def propose_fix(audit_id: str, finding_id: str):
         raise HTTPException(status_code=404, detail="Audit or finding not found") from None
     except FixSafetyError as error:
         raise HTTPException(status_code=409, detail=str(error)) from None
+    except ProviderRequestError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from None
 
 
 @app.post("/api/audits/{audit_id}/findings/{finding_id}/apply")

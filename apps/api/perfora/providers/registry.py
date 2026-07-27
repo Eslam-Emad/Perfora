@@ -5,7 +5,7 @@ from typing import Any
 
 from ..config import Settings
 from ..domain import ProviderCatalog, ProviderId
-from .base import ProviderAdapter
+from .base import ProviderAdapter, ProviderRequestError
 from .ollama import OllamaAdapter
 from .openai import OpenAIAdapter
 from .opencode import OpenCodeAdapter
@@ -35,4 +35,11 @@ class ProviderRegistry:
         prompt: str,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
-        return await self.adapter(provider).generate_json(model_id, prompt, schema)
+        try:
+            return await self.adapter(provider).generate_json(model_id, prompt, schema)
+        # Provider libraries and local CLIs expose different exception trees.
+        # Normalize them here so API routes never leak raw response bodies.
+        except Exception as error:
+            raise ProviderRequestError(
+                f"{provider.value}/{model_id} generation failed: {type(error).__name__}"
+            ) from error

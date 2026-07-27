@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import sys
 from pathlib import Path
 
 from .domain import RepositorySnapshot
 from .process import ProcessError, run_process
 
 IGNORED_PARTS = {".git", ".dart_tool", "build", "node_modules"}
+MACOS_FOLDER_PICKER = (
+    'POSIX path of (choose folder with prompt "Choose a Flutter project for Perfora")'
+)
+
+
+class RepositoryPickerError(RuntimeError):
+    pass
+
+
+class RepositoryPickerCancelled(RepositoryPickerError):
+    pass
 
 
 def _safe_resolve(raw_path: str) -> Path:
@@ -15,6 +27,21 @@ def _safe_resolve(raw_path: str) -> Path:
     if not path.is_absolute():
         raise ValueError("Repository path must be absolute")
     return path
+
+
+async def pick_repository_path() -> str:
+    if sys.platform != "darwin":
+        raise RepositoryPickerError("Native folder browsing is currently available on macOS")
+    try:
+        selected_path = await run_process(
+            ["osascript", "-e", MACOS_FOLDER_PICKER],
+            timeout=180,
+        )
+    except ProcessError as error:
+        if "User canceled" in error.output or "(-128)" in error.output:
+            raise RepositoryPickerCancelled("Folder selection was cancelled") from error
+        raise RepositoryPickerError("The native folder picker could not be opened") from error
+    return selected_path.rstrip("/")
 
 
 async def inspect_repository(raw_path: str) -> RepositorySnapshot:

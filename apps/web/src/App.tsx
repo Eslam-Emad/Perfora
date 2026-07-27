@@ -11,6 +11,7 @@ import {
   Code2,
   Download,
   FileCode2,
+  FolderOpen,
   FolderGit2,
   Gauge,
   GitBranch,
@@ -47,6 +48,8 @@ import type {
 
 type View = "setup" | "repositories" | "new-audit" | "workspace" | "settings";
 
+const PROJECTS_STORAGE_KEY = "perfora.projects";
+
 const providerNames: Record<ProviderId, string> = {
   opencode: "OpenCode",
   ollama: "Ollama",
@@ -59,12 +62,24 @@ const providerDescriptions: Record<ProviderId, string> = {
   openai: "Use the Responses API with structured, evidence-bound output.",
 };
 
+function loadSavedProjects(): RepositorySnapshot[] {
+  try {
+    const saved = window.localStorage.getItem(PROJECTS_STORAGE_KEY);
+    return saved ? (JSON.parse(saved) as RepositorySnapshot[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 function App() {
   const [view, setView] = useState<View>("setup");
   const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [setupLoading, setSetupLoading] = useState(true);
   const [setupError, setSetupError] = useState("");
-  const [repository, setRepository] = useState<RepositorySnapshot | null>(null);
+  const [projects, setProjects] = useState<RepositorySnapshot[]>(loadSavedProjects);
+  const [repository, setRepository] = useState<RepositorySnapshot | null>(
+    () => loadSavedProjects()[0] ?? null,
+  );
   const [audits, setAudits] = useState<AuditRecord[]>([]);
   const [activeAudit, setActiveAudit] = useState<AuditRecord | null>(null);
 
@@ -85,10 +100,25 @@ function App() {
     void api.listAudits().then(setAudits).catch(() => undefined);
   }, [refreshSetup]);
 
+  useEffect(() => {
+    window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+  }, [projects]);
+
+  const saveProject = (project: RepositorySnapshot) => {
+    setProjects((currentProjects) => [
+      project,
+      ...currentProjects.filter((savedProject) => savedProject.path !== project.path),
+    ]);
+    setRepository(project);
+  };
+
   const refreshAudit = useCallback(async (auditId: string) => {
     const current = await api.getAudit(auditId);
     setActiveAudit(current);
-    setAudits((items) => [current, ...items.filter((item) => item.id !== current.id)]);
+    setAudits((currentAudits) => [
+      current,
+      ...currentAudits.filter((audit) => audit.id !== current.id),
+    ]);
   }, []);
 
   useEffect(() => {
@@ -107,7 +137,7 @@ function App() {
 
   const openAudit = (audit: AuditRecord) => {
     setActiveAudit(audit);
-    setRepository(audit.repository);
+    saveProject(audit.repository);
     setView("workspace");
   };
 
@@ -129,8 +159,10 @@ function App() {
           {view === "repositories" && (
             <RepositoriesView
               repository={repository}
+              projects={projects}
               audits={audits}
-              onValidated={setRepository}
+              onValidated={saveProject}
+              onSelect={setRepository}
               onNewAudit={() => setView("new-audit")}
               onOpenAudit={openAudit}
             />
@@ -138,7 +170,9 @@ function App() {
           {view === "new-audit" && (
             <NewAuditView
               repository={repository}
+              projects={projects}
               catalogs={setup?.providers ?? []}
+              onSelectRepository={setRepository}
               onBack={() => setView("repositories")}
               onCreated={(audit) => {
                 setActiveAudit(audit);
@@ -173,7 +207,7 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
   return (
     <aside className="sidebar">
       <button className="brand" onClick={() => onNavigate("setup")}>
-        <span className="brand-mark"><Activity size={21} /></span>
+        <img className="brand-mark" src="/perfora-mark.svg" alt="" />
         <span>
           <strong>Perfora</strong>
           <small>Performance intelligence</small>
@@ -336,40 +370,105 @@ function ProviderCard({ provider }: { provider: ProviderCatalog }) {
 
 function RepositoriesView({
   repository,
+  projects,
   audits,
   onValidated,
+  onSelect,
   onNewAudit,
   onOpenAudit,
 }: {
   repository: RepositorySnapshot | null;
+  projects: RepositorySnapshot[];
   audits: AuditRecord[];
   onValidated: (repository: RepositorySnapshot) => void;
+  onSelect: (repository: RepositorySnapshot) => void;
   onNewAudit: () => void;
   onOpenAudit: (audit: AuditRecord) => void;
 }) {
   const [path, setPath] = useState(repository?.path ?? "");
-  const [loading, setLoading] = useState(false);
+  const [loadingAction, setLoadingAction] = useState<"browse" | "path" | null>(null);
   const [error, setError] = useState("");
+  const acceptProject = (selectedProject: RepositorySnapshot) => {
+    setPath(selectedProject.path);
+    if (!selectedProject.valid) throw new Error(selectedProject.detail);
+    onValidated(selectedProject);
+  };
   const validate = async () => {
-    setLoading(true);
+    setLoadingAction("path");
     setError("");
     try {
-      const result = await api.validateRepository(path);
-      if (!result.valid) throw new Error(result.detail);
-      onValidated(result);
+      acceptProject(await api.validateRepository(path.trim()));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Repository validation failed");
     } finally {
-      setLoading(false);
+      setLoadingAction(null);
+    }
+  };
+  const browse = async () => {
+    setLoadingAction("browse");
+    setError("");
+    try {
+      acceptProject(await api.pickRepository());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Folder selection failed");
+    } finally {
+      setLoadingAction(null);
     }
   };
   return (
     <section className="page">
       <PageHeading eyebrow="Source context" title="Connect a local Flutter repository." description="Perfora records the exact branch, commit, SDK context, and package fingerprint behind every finding." />
       <div className="repo-connect">
-        <div className="connect-icon"><FolderGit2 size={28} /></div>
-        <div className="connect-copy"><strong>Local repository path</strong><span>No cloning and no source upload during validation.</span></div>
-        <div className="path-input"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/Users/you/projects/flutter_app" /><button className="button primary" onClick={validate} disabled={!path || loading}>{loading ? <LoaderCircle className="spin" /> : <Plus />} Validate</button></div>
+        <div className="connect-icon"><FolderOpen size={28} /></div>
+        <div className="connect-copy"><strong>Project picker</strong><span>Select a saved project or add its static absolute path.</span></div>
+        <div className="project-picker">
+          <label>
+            Saved projects
+            <select
+              value={repository?.path ?? ""}
+              onChange={(event) => {
+                const selectedProject = projects.find(
+                  (project) => project.path === event.target.value,
+                );
+                if (selectedProject) {
+                  setPath(selectedProject.path);
+                  onSelect(selectedProject);
+                }
+              }}
+              disabled={projects.length === 0}
+            >
+              <option value="">{projects.length ? "Choose a project" : "No saved projects yet"}</option>
+              {projects.map((project) => (
+                <option key={project.path} value={project.path}>
+                  {project.name} — {project.path}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="path-input">
+            <input
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              placeholder="/Users/you/projects/flutter_app"
+              aria-label="Static project path"
+            />
+            <button
+              className="button secondary"
+              onClick={browse}
+              disabled={loadingAction !== null}
+            >
+              {loadingAction === "browse" ? <LoaderCircle className="spin" /> : <FolderOpen />}
+              Browse…
+            </button>
+            <button
+              className="button primary"
+              onClick={validate}
+              disabled={!path.trim() || loadingAction !== null}
+            >
+              {loadingAction === "path" ? <LoaderCircle className="spin" /> : <Plus />} Add path
+            </button>
+          </div>
+        </div>
         {error && <p className="field-error"><CircleAlert size={15} /> {error}</p>}
       </div>
       {repository && (
@@ -380,10 +479,10 @@ function RepositoriesView({
             <div><p className="eyebrow">Validated Flutter repository</p><h2>{repository.name}</h2><code>{repository.path}</code></div>
           </div>
           <div className="repo-stats">
-            <Metric label="Branch" value={repository.branch || "No branch"} icon={GitBranch} />
-            <Metric label="Revision" value={repository.commit_sha?.slice(0, 8) || "Uncommitted"} icon={Code2} />
-            <Metric label="Packages" value={String(repository.packages.length)} icon={Layers3} />
-            <Metric label="Worktree" value={repository.clean ? "Clean" : "Has changes"} icon={repository.clean ? CircleCheck : CircleAlert} />
+            <Metric label="Branch" displayValue={repository.branch || "No branch"} icon={GitBranch} />
+            <Metric label="Revision" displayValue={repository.commit_sha?.slice(0, 8) || "Uncommitted"} icon={Code2} />
+            <Metric label="Packages" displayValue={String(repository.packages.length)} icon={Layers3} />
+            <Metric label="Worktree" displayValue={repository.clean ? "Clean" : "Has changes"} icon={repository.clean ? CircleCheck : CircleAlert} />
           </div>
           <div className="repo-actions"><span><ShieldCheck size={16} /> Fingerprint {repository.fingerprint?.slice(0, 12)}</span><button className="button primary" onClick={onNewAudit}><Sparkles size={16} /> New audit</button></div>
         </article>
@@ -407,22 +506,38 @@ function RepositoriesView({
 
 function NewAuditView({
   repository,
+  projects,
   catalogs,
+  onSelectRepository,
   onBack,
   onCreated,
 }: {
   repository: RepositorySnapshot | null;
+  projects: RepositorySnapshot[];
   catalogs: ProviderCatalog[];
+  onSelectRepository: (repository: RepositorySnapshot) => void;
   onBack: () => void;
   onCreated: (audit: AuditRecord) => void;
 }) {
-  const compatibleModels = useMemo(() => catalogs.flatMap((catalog) => catalog.models.filter((model) => model.compatible)), [catalogs]);
-  const [modelKey, setModelKey] = useState(compatibleModels[0] ? `${compatibleModels[0].provider}:${compatibleModels[0].id}` : "");
-  const selected = compatibleModels.find((model) => `${model.provider}:${model.id}` === modelKey);
+  const providerCatalogs = useMemo(
+    () => catalogs.filter(
+      (catalog) => catalog.available && catalog.models.some((model) => model.compatible),
+    ),
+    [catalogs],
+  );
+  const [providerId, setProviderId] = useState<ProviderId | "">("");
+  const [modelId, setModelId] = useState("");
+  const [modelFilter, setModelFilter] = useState("");
+  const providerCatalog = providerCatalogs.find((catalog) => catalog.provider === providerId);
+  const providerModels = providerCatalog?.models.filter((model) => model.compatible) ?? [];
+  const visibleModels = providerModels.filter((model) =>
+    `${model.label} ${model.id}`.toLowerCase().includes(modelFilter.trim().toLowerCase()),
+  );
+  const selected = providerModels.find((model) => model.id === modelId);
   const [consent, setConsent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const isRemote = selected?.locality !== "local";
+  const isRemote = selected ? selected.locality !== "local" : false;
   const create = async () => {
     if (!repository || !selected) return;
     setLoading(true);
@@ -447,14 +562,76 @@ function NewAuditView({
       <PageHeading eyebrow="Immutable run configuration" title="Start an evidence-first audit." description="The selected model and repository revision are permanently attached to this run. Perfora never falls back silently." />
       <div className="step-card">
         <span className="step-number">1</span><div className="step-body"><h2>Repository revision</h2><p>Confirm the exact source snapshot to analyze.</p>
+          <label className="select-label project-select">
+            Project
+            <select
+              value={repository.path}
+              onChange={(event) => {
+                const selectedProject = projects.find(
+                  (project) => project.path === event.target.value,
+                );
+                if (selectedProject) onSelectRepository(selectedProject);
+              }}
+            >
+              {projects.map((project) => (
+                <option key={project.path} value={project.path}>
+                  {project.name} — {project.path}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="selection-card"><FolderGit2 /><div><strong>{repository.name}</strong><code>{repository.path}</code></div><div className="selection-meta"><span>{repository.branch || "no branch"}</span><span>{repository.commit_sha?.slice(0, 8) || "no commit"}</span></div></div>
         </div>
       </div>
       <div className="step-card">
-        <span className="step-number">2</span><div className="step-body"><h2>Analysis model</h2><p>Choose one discovered, compatible model.</p>
-          <label className="select-label">Provider and model<select value={modelKey} onChange={(event) => setModelKey(event.target.value)}><option value="">Select a model</option>{catalogs.map((catalog) => <optgroup key={catalog.provider} label={`${providerNames[catalog.provider]} · ${catalog.available ? "ready" : "unavailable"}`}>{catalog.models.filter((model) => model.compatible).map((model) => <option key={`${catalog.provider}:${model.id}`} value={`${catalog.provider}:${model.id}`}>{model.label} · {model.locality}</option>)}</optgroup>)}</select></label>
+        <span className="step-number">2</span><div className="step-body"><h2>Analysis model</h2><p>Select the exact provider and model for this audit.</p>
+          <div className="model-provider-picker">
+            {providerCatalogs.map((catalog) => (
+              <button
+                type="button"
+                key={catalog.provider}
+                className={providerId === catalog.provider ? "model-provider selected" : "model-provider"}
+                onClick={() => {
+                  setProviderId(catalog.provider);
+                  setModelId("");
+                  setModelFilter("");
+                  setConsent(false);
+                }}
+              >
+                <span className={`provider-logo mini ${catalog.provider}`}><Bot /></span>
+                <span><strong>{providerNames[catalog.provider]}</strong><small>{catalog.models.filter((model) => model.compatible).length} models</small></span>
+                {providerId === catalog.provider && <Check size={17} />}
+              </button>
+            ))}
+          </div>
+          {providerCatalog && (
+            <div className="model-choice">
+              <label className="select-label">
+                Filter models
+                <input
+                  value={modelFilter}
+                  onChange={(event) => setModelFilter(event.target.value)}
+                  placeholder={`Search ${providerNames[providerCatalog.provider]} models`}
+                />
+              </label>
+              <label className="select-label">
+                Model
+                <select value={modelId} onChange={(event) => setModelId(event.target.value)}>
+                  <option value="">Select a model</option>
+                  {visibleModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label} · {model.locality}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {visibleModels.length === 0 && (
+                <p className="field-hint">No models match “{modelFilter}”.</p>
+              )}
+            </div>
+          )}
           {selected && <div className="model-summary"><span className={`provider-logo mini ${selected.provider}`}><Bot /></span><div><strong>{selected.label}</strong><span>{providerNames[selected.provider]} · {selected.locality} · {selected.capability_status}</span></div><Check size={18} /></div>}
-          {compatibleModels.length === 0 && <Notice tone="warning" title="No compatible model found">Configure OpenCode or Ollama, or refresh OpenAI model discovery in Settings.</Notice>}
+          {providerCatalogs.length === 0 && <Notice tone="warning" title="No compatible model found">Configure OpenCode or Ollama, or refresh OpenAI model discovery in Settings.</Notice>}
         </div>
       </div>
       <div className="step-card">
@@ -485,10 +662,10 @@ function AuditWorkspace({ audit, onRefresh, onNewAudit }: { audit: AuditRecord |
       </div>
       <div className="progress-band"><div className="progress-copy"><span className={`pulse ${audit.status}`} /> <strong>{audit.events.at(-1)?.message || audit.status}</strong><span>{progress}%</span></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div>
       <div className="evidence-summary">
-        <Metric label="Confirmed findings" value={String(audit.findings.filter((finding) => finding.status === "confirmed").length)} icon={ShieldCheck} />
-        <Metric label="High severity" value={String(audit.findings.filter((finding) => ["high", "critical"].includes(finding.severity)).length)} icon={Zap} />
-        <Metric label="Files transmitted" value={String(audit.context_manifest.length)} icon={FileCode2} />
-        <Metric label="Run status" value={audit.status} icon={Activity} />
+        <Metric label="Confirmed findings" displayValue={String(audit.findings.filter((finding) => finding.status === "confirmed").length)} icon={ShieldCheck} />
+        <Metric label="High severity" displayValue={String(audit.findings.filter((finding) => ["high", "critical"].includes(finding.severity)).length)} icon={Zap} />
+        <Metric label="Files transmitted" displayValue={String(audit.context_manifest.length)} icon={FileCode2} />
+        <Metric label="Run status" displayValue={audit.status} icon={Activity} />
       </div>
       {audit.error && <Notice tone={audit.status === "partial" ? "warning" : "danger"} title={audit.status === "partial" ? "Partial audit" : "Audit failed"}>{audit.error}</Notice>}
       <div className="investigation-grid">
@@ -526,11 +703,11 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
     <>
       <div className="detail-heading"><div><div className="finding-tags"><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><span className="confirmed-pill"><ShieldCheck size={13} /> {finding.status}</span><span>{finding.framework}</span></div><h2>{finding.title}</h2><code>{finding.file}:{finding.line} · {finding.symbol}</code></div><button className="button primary" onClick={propose} disabled={loading || audit.status === "partial"}>{loading ? <LoaderCircle className="spin" /> : <Wrench />} Generate fix</button></div>
       <div className="detail-section"><p className="eyebrow">Causal explanation</p><p className="lead-copy">{finding.model_explanation || finding.explanation}</p></div>
-      <div className="detail-section"><p className="eyebrow">Deterministic evidence</p><div className="evidence-list">{finding.evidence.map((item) => <div key={item}><CircleCheck size={16} /><span>{item}</span></div>)}</div></div>
+      <div className="detail-section"><p className="eyebrow">Deterministic evidence</p><div className="evidence-list">{finding.evidence.map((evidenceLine) => <div key={evidenceLine}><CircleCheck size={16} /><span>{evidenceLine}</span></div>)}</div></div>
       <div className="detail-section recommendation"><div className="recommendation-icon"><Sparkles size={19} /></div><div><p className="eyebrow">Recommended change</p><p>{finding.recommendation}</p></div></div>
       <div className="context-manifest"><LockKeyhole size={16} /><span><strong>Context manifest:</strong> only {audit.context_manifest.length ? audit.context_manifest.join(", ") : "deterministic evidence"} was selected for model enrichment.</span></div>
       {error && <Notice tone="danger" title="Apply Fix">{error}</Notice>}
-      {proposal && <div className="fix-review"><div className="fix-review-heading"><div><p className="eyebrow">Reviewed patch required</p><h3>{proposal.summary}</h3><span>Risk: {proposal.risk}</span></div><button className="icon-button" onClick={() => setProposal(null)}><X size={17} /></button></div><pre>{proposal.patch}</pre><div className="fix-actions"><span><GitBranch size={15} /> Will create perfora/fix-{finding.id.slice(0, 8)}</span>{applied ? <button className="button secondary danger" onClick={rollback} disabled={loading}><RotateCcw size={16} /> Roll back</button> : <button className="button primary" onClick={apply} disabled={loading}><ShieldCheck size={16} /> Approve & apply</button>}</div></div>}
+      {proposal && <div className="fix-review"><div className="fix-review-heading"><div><p className="eyebrow">Reviewed patch required</p><h3>{proposal.summary}</h3><span>Risk: {proposal.risk}</span></div><button className="icon-button" onClick={() => setProposal(null)}><X size={17} /></button></div><pre>{proposal.patch}</pre><div className="fix-actions"><span><GitBranch size={15} /> Will create perfora/fix-{finding.id.slice(0, 8)}</span><div className="fix-action-buttons"><button className="button secondary" onClick={() => downloadPatch(proposal, finding.file)}><Download size={16} /> Download patch</button>{applied ? <button className="button secondary danger" onClick={rollback} disabled={loading}><RotateCcw size={16} /> Roll back</button> : <button className="button primary" onClick={apply} disabled={loading}><ShieldCheck size={16} /> Approve & apply</button>}</div></div></div>}
     </>
   );
 }
@@ -550,7 +727,7 @@ function SettingsView({ setup, onRefresh }: { setup: SetupStatus | null; onRefre
           <div className="privacy-illustration"><ShieldCheck size={38} /><span className="orbit one" /><span className="orbit two" /></div>
           <p className="eyebrow">Privacy posture</p><h2>Zero automatic telemetry.</h2><p>Repository contents, prompts, responses, and audit logs remain local except for evidence explicitly approved for a remote model.</p>
           <ul><li><Check /> Secrets redacted before model context</li><li><Check /> Unknown routing treated as remote</li><li><Check /> Context manifest saved per audit</li><li><Check /> No silent provider fallback</li></ul>
-          <div className="key-status"><KeyRound size={17} /><div><strong>OpenAI credential</strong><span>{setup?.providers.find((item) => item.provider === "openai")?.available ? "Configured in local environment" : "Not configured"}</span></div></div>
+          <div className="key-status"><KeyRound size={17} /><div><strong>OpenAI credential</strong><span>{setup?.providers.find((provider) => provider.provider === "openai")?.available ? "Configured in local environment" : "Not configured"}</span></div></div>
         </aside>
       </div>
     </section>
@@ -569,8 +746,8 @@ function StatusPill({ ready, label }: { ready: boolean; label?: string }) {
   return <span className={ready ? "status-pill ready" : "status-pill unavailable"}>{ready ? <CircleCheck size={13} /> : <CircleAlert size={13} />}{label ?? (ready ? "Ready" : "Unavailable")}</span>;
 }
 
-function Metric({ label, value, icon: Icon }: { label: string; value: string; icon: typeof Activity }) {
-  return <div className="metric"><span className="metric-icon"><Icon size={17} /></span><div><small>{label}</small><strong>{value}</strong></div></div>;
+function Metric({ label, displayValue, icon: Icon }: { label: string; displayValue: string; icon: typeof Activity }) {
+  return <div className="metric"><span className="metric-icon"><Icon size={17} /></span><div><small>{label}</small><strong>{displayValue}</strong></div></div>;
 }
 
 function Notice({ tone, title, children }: { tone: "warning" | "danger"; title: string; children: React.ReactNode }) {
@@ -583,6 +760,19 @@ function EmptyState({ icon: Icon, title, description, action }: { icon: typeof A
 
 function ExportMenu({ audit }: { audit: AuditRecord }) {
   return <div className="export-group"><Download size={16} />{(["html", "json", "sarif"] as const).map((format) => <a key={format} href={`/api/audits/${audit.id}/export?format=${format}`} download>{format.toUpperCase()}</a>)}</div>;
+}
+
+function downloadPatch(proposal: FixProposal, findingFile: string) {
+  const patchBlob = new Blob([proposal.patch], { type: "text/x-patch" });
+  const patchUrl = URL.createObjectURL(patchBlob);
+  const patchLink = document.createElement("a");
+  const sourceName = findingFile.split("/").at(-1)?.replace(/\.dart$/, "") ?? "perfora-fix";
+  patchLink.href = patchUrl;
+  patchLink.download = `${sourceName}-${proposal.finding_id.slice(0, 8)}.patch`;
+  document.body.append(patchLink);
+  patchLink.click();
+  patchLink.remove();
+  window.setTimeout(() => URL.revokeObjectURL(patchUrl), 0);
 }
 
 export default App;
