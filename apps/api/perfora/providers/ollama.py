@@ -27,9 +27,13 @@ class OllamaAdapter(ProviderAdapter):
                     provider=self.id,
                     id=item["name"],
                     label=item.get("model") or item["name"],
-                    compatible=True,
-                    capability_status="unknown",
-                    locality="local",
+                    compatible="embed" not in item["name"].lower(),
+                    capability_status=(
+                        "unsupported"
+                        if "embed" in item["name"].lower()
+                        else "unknown"
+                    ),
+                    locality="remote" if ":cloud" in item["name"] else "local",
                     metadata={
                         "size": item.get("size"),
                         "modified_at": item.get("modified_at"),
@@ -62,6 +66,7 @@ class OllamaAdapter(ProviderAdapter):
                     "model": model_id,
                     "prompt": prompt,
                     "stream": False,
+                    "think": False,
                     "format": schema,
                     "options": {"temperature": 0},
                 },

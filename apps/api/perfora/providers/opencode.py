@@ -21,13 +21,30 @@ class OpenCodeAdapter(ProviderAdapter):
             )
         try:
             output = await run_process([executable, "models"], timeout=20)
+            unsupported_markers = (
+                "audio",
+                "embedding",
+                "image",
+                "moderation",
+                "realtime",
+                "transcribe",
+                "tts",
+                "whisper",
+                "sora",
+            )
             models = [
                 ModelInfo(
                     provider=self.id,
                     id=line.strip(),
                     label=line.strip(),
-                    compatible=True,
-                    capability_status="unknown",
+                    compatible=not any(
+                        marker in line.lower() for marker in unsupported_markers
+                    ),
+                    capability_status=(
+                        "unsupported"
+                        if any(marker in line.lower() for marker in unsupported_markers)
+                        else "unknown"
+                    ),
                     locality="unknown",
                     metadata={"routing": "OpenCode-managed"},
                 )
