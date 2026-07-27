@@ -1,0 +1,16 @@
+{
+  "name": "perfora",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace @perfora/web run dev",
+    "build:web": "npm --workspace @perfora/web run build",
+    "test:web": "npm --workspace @perfora/web run test",
+    "dev:api": ".venv/bin/uvicorn perfora.main:app --app-dir apps/api --host 127.0.0.1 --port 8765",
+    "test:api": ".venv/bin/pytest apps/api/tests",
+    "test": "npm run test:web && npm run test:api"
+  }
+}

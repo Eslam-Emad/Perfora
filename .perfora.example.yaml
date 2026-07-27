@@ -1,0 +1,15 @@
+version: 1
+include:
+  - lib/**
+exclude:
+  - "**/*.g.dart"
+  - "**/*.freezed.dart"
+  - build/**
+rules:
+  lifecycle:
+    enabled: true
+verification:
+  commands:
+    - flutter analyze
+    - flutter test
+
