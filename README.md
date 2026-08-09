@@ -5,7 +5,7 @@
 <h1 align="center">Perfora</h1>
 
 <p align="center">
-  Evidence-first AI performance engineering for Flutter applications.
+  Evidence-first AI performance and security engineering for Flutter applications.
 </p>
 
 Perfora is a local-first web workspace that inspects a Flutter repository with a
@@ -26,6 +26,8 @@ switching providers or models.
   identifier and its discovered metadata.
 - Static lifecycle-resource checks for Riverpod, Provider, Bloc/Cubit, GetX,
   and general Flutter classes.
+- Static security checks for hardcoded credentials, cleartext endpoints, disabled
+  TLS validation, Android cleartext traffic, and global iOS transport exceptions.
 - Evidence, severity, confidence, source location, recommendation, and model
   explanation views.
 - Server-sent audit progress events and durable audit history in SQLite.
@@ -111,11 +113,12 @@ Use `Ctrl+C` in both terminals to stop the app.
 3. Select **Browse…** to use the native macOS folder picker, or enter an
    absolute Flutter project path and select **Add path**.
 4. Select **New audit**.
-5. Confirm the project, select a provider, filter its discovered models, and
-   choose the exact model to use.
-6. Approve source evidence transmission when the selected model is remote or
+5. Confirm the project and choose the lifecycle-performance or application-security
+   audit flow.
+6. Select a provider, filter its discovered models, and choose the exact model to use.
+7. Approve source evidence transmission when the selected model is remote or
    its routing locality is unknown.
-7. Start the audit and inspect the streamed evidence.
+8. Start the audit and inspect the streamed evidence and recommendations.
 
 ## Model providers
 
@@ -136,10 +139,10 @@ or model is no longer available.
    a source fingerprint.
 2. `AuditCoordinator` saves a queued audit and sends its identifier to one
    in-process `asyncio.Queue` worker.
-3. `DartAnalyzerClient` starts the analyzer worker with
-   `dart run bin/perfora_analyzer.dart --root <repository>`.
-4. The Dart worker parses `.dart` files into syntax trees and finds owned
-   lifecycle resources without a matching cleanup call.
+3. `DartAnalyzerClient` starts the selected analyzer worker with
+   `dart run bin/perfora_analyzer.dart --root <repository> --audit-type <type>`.
+4. The Dart worker either finds owned lifecycle resources without matching cleanup,
+   or inspects security-sensitive Dart code and Android/iOS transport policy.
 5. Confirmed findings are persisted before model generation begins.
 6. The selected provider enriches the first finding with a structured
    explanation and recommendation. Provider failure leaves a durable partial
@@ -154,6 +157,19 @@ or model is no longer available.
 | Controllers, notifiers, focus nodes, and GetX workers | `dispose()` |
 | `StreamSubscription` and `Timer` | `cancel()` |
 | `StreamController` | `close()` |
+
+### Security rule pack
+
+| Rule | Confirmed evidence |
+| --- | --- |
+| Hardcoded credential | A sensitive identifier is assigned a non-placeholder string literal; the value is never included in evidence |
+| Cleartext endpoint | A non-loopback `http://` URL is embedded in Dart source |
+| Disabled TLS validation | `badCertificateCallback` unconditionally accepts certificates |
+| Android cleartext traffic | `AndroidManifest.xml` explicitly enables `usesCleartextTraffic` |
+| iOS arbitrary loads | `Info.plist` globally enables `NSAllowsArbitraryLoads` |
+
+Every finding includes a deterministic explanation and a specific recommendation.
+The selected model may enrich the first finding without replacing the observed evidence.
 
 The analyzer recognizes framework ownership through class inheritance and
 lifecycle hooks. Files ending in `.g.dart`, `.freezed.dart`, `.gr.dart`, or

@@ -18,6 +18,11 @@ class ProviderId(StrEnum):
     OPENAI = "openai"
 
 
+class AuditType(StrEnum):
+    PERFORMANCE = "performance"
+    SECURITY = "security"
+
+
 class ToolStatus(BaseModel):
     id: str
     label: str
@@ -71,6 +76,7 @@ class AuditCreate(BaseModel):
     repository_path: str
     provider: ProviderId
     model_id: str
+    audit_type: AuditType = AuditType.PERFORMANCE
     remote_source_consent: bool = False
 
 
@@ -109,6 +115,7 @@ class AuditRecord(BaseModel):
     repository: RepositorySnapshot
     provider: ProviderId
     model_id: str
+    audit_type: AuditType = AuditType.PERFORMANCE
     model_metadata: dict[str, Any] = Field(default_factory=dict)
     status: Literal["queued", "running", "partial", "completed", "failed", "cancelled"]
     created_at: datetime = Field(default_factory=utc_now)

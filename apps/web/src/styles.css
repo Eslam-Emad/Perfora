@@ -203,6 +203,18 @@ code, pre { font-family: "JetBrains Mono", monospace; }
 .select-label select, .select-label input { width: 100%; height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; outline: 0; background: white; color: var(--ink); font-size: 11px; }
 .select-label select:focus, .select-label input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(20,125,100,.09); }
 .project-select { margin-bottom: 10px; }
+.audit-type-picker { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+.audit-type-option { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: white; cursor: pointer; text-align: left; }
+.audit-type-option:hover { border-color: #a9beb6; }
+.audit-type-option.selected { border-color: var(--green); background: #f4faf7; box-shadow: 0 0 0 2px rgba(20,125,100,.07); }
+.audit-type-option > span:nth-child(2) { min-width: 0; flex: 1; }
+.audit-type-option strong, .audit-type-option small { display: block; }
+.audit-type-option strong { font-size: 11px; }
+.audit-type-option small { margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.audit-type-option > svg { flex: none; color: var(--green); }
+.audit-type-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: 9px; color: var(--green); background: var(--green-pale); }
+.audit-type-icon svg { width: 17px; }
+.audit-type-icon.security { color: #9e2c37; background: #fee8ea; }
 .model-provider-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 11px; }
 .model-provider { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: white; cursor: pointer; text-align: left; }
 .model-provider:hover { border-color: #a9beb6; }
@@ -358,6 +370,7 @@ code, pre { font-family: "JetBrains Mono", monospace; }
   .brand { justify-content: center; padding-inline: 0; }
   .nav-item { justify-content: center; }
   .main-shell { margin-left: 0; }
+  .audit-type-picker { grid-template-columns: 1fr; }
   .topbar { padding-inline: 18px; }
   .privacy-chip, .provider-chip { display: none; }
   .page, .workspace-page { padding-inline: 18px; }

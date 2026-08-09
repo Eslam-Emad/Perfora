@@ -37,6 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./lib/api";
 import type {
   AuditRecord,
+  AuditType,
   Finding,
   FixProposal,
   ModelInfo,
@@ -62,6 +63,15 @@ const providerDescriptions: Record<ProviderId, string> = {
   ollama: "Run private analysis with models hosted on this machine.",
   openai: "Use the Responses API with structured, evidence-bound output.",
 };
+
+const auditTypeNames: Record<AuditType, string> = {
+  performance: "Lifecycle performance",
+  security: "Application security",
+};
+
+function auditTypeOf(audit: AuditRecord): AuditType {
+  return audit.audit_type ?? "performance";
+}
 
 function loadSavedProjects(): RepositorySnapshot[] {
   try {
@@ -242,7 +252,7 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
         <img className="brand-mark" src="/perfora-mark.svg" alt="" />
         <span>
           <strong>Perfora</strong>
-          <small>Performance intelligence</small>
+          <small>Performance &amp; security</small>
         </span>
       </button>
       <nav className="primary-nav" aria-label="Primary navigation">
@@ -618,7 +628,7 @@ function RepositoriesView({
         {audits.length === 0 ? <EmptyState icon={Clock3} title="No audits yet" description="Your first evidence trail will appear here." /> : audits.map((audit) => (
           <button className="audit-row" key={audit.id} onClick={() => onOpenAudit(audit)}>
             <span className={`audit-status ${audit.status}`}><Activity size={16} /></span>
-            <span className="audit-row-main"><strong>{audit.repository.name}</strong><small>{new Date(audit.created_at).toLocaleString()}</small></span>
+            <span className="audit-row-main"><strong>{audit.repository.name}</strong><small>{auditTypeNames[auditTypeOf(audit)]} · {new Date(audit.created_at).toLocaleString()}</small></span>
             <span><strong>{audit.findings.length}</strong><small>findings</small></span>
             <span><strong>{providerNames[audit.provider]}</strong><small>{audit.model_id}</small></span>
             <StatusPill ready={audit.status === "completed"} label={audit.status} />
@@ -652,6 +662,7 @@ function NewAuditView({
     [catalogs],
   );
   const [providerId, setProviderId] = useState<ProviderId | "">("");
+  const [auditType, setAuditType] = useState<AuditType>("performance");
   const [modelId, setModelId] = useState("");
   const [modelFilter, setModelFilter] = useState("");
   const providerCatalog = providerCatalogs.find((catalog) => catalog.provider === providerId);
@@ -688,6 +699,7 @@ function NewAuditView({
         repository_path: repository.path,
         provider: selected.provider,
         model_id: selected.id,
+        audit_type: auditType,
         remote_source_consent: isRemote ? consent : false,
       });
       onCreated(audit);
@@ -726,7 +738,31 @@ function NewAuditView({
         </div>
       </div>
       <div className="step-card">
-        <span className="step-number">2</span><div className="step-body"><h2>Analysis model</h2><p>Select the exact provider and model for this audit.</p>
+        <span className="step-number">2</span><div className="step-body"><h2>Audit flow</h2><p>Choose the deterministic rule pack to run against this repository.</p>
+          <div className="audit-type-picker">
+            <button
+              type="button"
+              className={auditType === "performance" ? "audit-type-option selected" : "audit-type-option"}
+              onClick={() => setAuditType("performance")}
+            >
+              <span className="audit-type-icon"><Activity /></span>
+              <span><strong>Lifecycle performance</strong><small>Find owned resources that are not released by Flutter state-management lifecycles.</small></span>
+              {auditType === "performance" && <Check size={17} />}
+            </button>
+            <button
+              type="button"
+              className={auditType === "security" ? "audit-type-option selected" : "audit-type-option"}
+              onClick={() => setAuditType("security")}
+            >
+              <span className="audit-type-icon security"><LockKeyhole /></span>
+              <span><strong>Application security</strong><small>Inspect secrets, transport security, TLS validation, and mobile platform policies.</small></span>
+              {auditType === "security" && <Check size={17} />}
+            </button>
+          </div>
+        </div>
+      </div>
+      <div className="step-card">
+        <span className="step-number">3</span><div className="step-body"><h2>Analysis model</h2><p>Select the exact provider and model for this audit.</p>
           <div className="model-provider-picker">
             {providerCatalogs.map((catalog) => (
               <button
@@ -777,8 +813,8 @@ function NewAuditView({
         </div>
       </div>
       <div className="step-card">
-        <span className="step-number">3</span><div className="step-body"><h2>Evidence and privacy</h2><p>The lifecycle rule pack covers Riverpod, Provider, Bloc/Cubit, and GetX.</p>
-          <div className="rule-strip"><ShieldCheck /><div><strong>Deterministic lifecycle analysis</strong><span>Owned controllers, streams, timers, and workers are matched to cleanup hooks.</span></div><span className="rule-count">4 frameworks</span></div>
+        <span className="step-number">4</span><div className="step-body"><h2>Evidence and privacy</h2><p>{auditType === "security" ? "The security rule pack reports only directly observed source and platform configuration evidence." : "The lifecycle rule pack covers Riverpod, Provider, Bloc/Cubit, and GetX."}</p>
+          <div className="rule-strip"><ShieldCheck /><div><strong>{auditType === "security" ? "Deterministic security analysis" : "Deterministic lifecycle analysis"}</strong><span>{auditType === "security" ? "Checks hardcoded credentials, cleartext transport, TLS bypasses, Android manifests, and iOS transport policy." : "Owned controllers, streams, timers, and workers are matched to cleanup hooks."}</span></div><span className="rule-count">{auditType === "security" ? "5 rules" : "4 frameworks"}</span></div>
           {isRemote && <label className="consent-card"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span><strong>I approve evidence snippets for this remote provider</strong><small>Perfora redacts likely secrets and records the transmitted file manifest.</small></span></label>}
         </div>
       </div>
@@ -794,12 +830,13 @@ function AuditWorkspace({ audit, onRefresh, onNewAudit }: { audit: AuditRecord |
     if (audit?.findings.length && !audit.findings.some((finding) => finding.id === selectedId)) setSelectedId(audit.findings[0].id);
   }, [audit?.findings, selectedId]);
   if (!audit) return <section className="page"><EmptyState icon={SearchCode} title="No audit selected" description="Start or open an audit to inspect its evidence." action={<button className="button primary" onClick={onNewAudit}>Create audit</button>} /></section>;
+  const auditType = auditTypeOf(audit);
   const selected = audit.findings.find((finding) => finding.id === selectedId) ?? audit.findings[0];
   const progress = audit.events.at(-1)?.progress ?? 0;
   return (
     <section className="workspace-page">
       <div className="workspace-header">
-        <div><p className="eyebrow">{audit.repository.name} · {audit.repository.branch || "detached"}</p><h1>Lifecycle evidence audit</h1><div className="audit-meta"><span><Bot size={14} /> {providerNames[audit.provider]}/{audit.model_id}</span><span><GitBranch size={14} /> {audit.repository.commit_sha?.slice(0, 8) || "no commit"}</span><span><Clock3 size={14} /> {new Date(audit.created_at).toLocaleTimeString()}</span></div></div>
+        <div><p className="eyebrow">{audit.repository.name} · {audit.repository.branch || "detached"}</p><h1>{auditType === "security" ? "Security evidence audit" : "Lifecycle performance audit"}</h1><div className="audit-meta"><span><Bot size={14} /> {providerNames[audit.provider]}/{audit.model_id}</span><span><GitBranch size={14} /> {audit.repository.commit_sha?.slice(0, 8) || "no commit"}</span><span><Clock3 size={14} /> {new Date(audit.created_at).toLocaleTimeString()}</span></div></div>
         <div className="workspace-actions"><button className="button secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh</button><ExportMenu audit={audit} /></div>
       </div>
       <div className="progress-band"><div className="progress-copy"><span className={`pulse ${audit.status}`} /> <strong>{audit.events.at(-1)?.message || audit.status}</strong><span>{progress}%</span></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div>
@@ -813,10 +850,10 @@ function AuditWorkspace({ audit, onRefresh, onNewAudit }: { audit: AuditRecord |
       <div className="investigation-grid">
         <aside className="findings-panel">
           <div className="panel-heading"><div><p className="eyebrow">Evidence queue</p><h2>Findings</h2></div><span>{audit.findings.length}</span></div>
-          {audit.findings.length === 0 ? <div className="panel-empty"><LoaderCircle className={audit.status === "running" ? "spin" : ""} /><strong>{audit.status === "running" ? "Analyzing syntax trees" : "No lifecycle findings"}</strong></div> : audit.findings.map((finding) => <button key={finding.id} className={selected?.id === finding.id ? "finding-row selected" : "finding-row"} onClick={() => setSelectedId(finding.id)}><span className={`severity-mark ${finding.severity}`} /><div><span className="finding-framework">{finding.framework}</span><strong>{finding.title}</strong><small>{finding.file}:{finding.line}</small></div><span className="confidence">{Math.round(finding.confidence * 100)}%</span></button>)}
+          {audit.findings.length === 0 ? <div className="panel-empty"><LoaderCircle className={audit.status === "running" ? "spin" : ""} /><strong>{audit.status === "running" ? `Analyzing ${auditType} evidence` : `No ${auditType} findings`}</strong></div> : audit.findings.map((finding) => <button key={finding.id} className={selected?.id === finding.id ? "finding-row selected" : "finding-row"} onClick={() => setSelectedId(finding.id)}><span className={`severity-mark ${finding.severity}`} /><div><span className="finding-framework">{finding.framework}</span><strong>{finding.title}</strong><small>{finding.file}:{finding.line}</small></div><span className="confidence">{Math.round(finding.confidence * 100)}%</span></button>)}
         </aside>
         <div className="detail-panel">
-          {selected ? <FindingDetail finding={selected} audit={audit} onRefresh={onRefresh} /> : <EmptyState icon={SearchCode} title="Waiting for evidence" description="The deterministic analyzer is inspecting lifecycle ownership." />}
+          {selected ? <FindingDetail finding={selected} audit={audit} onRefresh={onRefresh} /> : <EmptyState icon={SearchCode} title="Waiting for evidence" description={auditType === "security" ? "The deterministic analyzer is inspecting application security controls." : "The deterministic analyzer is inspecting lifecycle ownership."} />}
         </div>
       </div>
     </section>

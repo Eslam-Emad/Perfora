@@ -18,9 +18,13 @@ FIX_SCHEMA = {
     "properties": {
         "summary": {"type": "string"},
         "risk": {"type": "string"},
-        "patch": {"type": "string"},
+        "patch_lines": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 5,
+        },
     },
-    "required": ["summary", "risk", "patch"],
+    "required": ["summary", "risk", "patch_lines"],
     "additionalProperties": False,
 }
 DIFF_PATH = re.compile(r"^diff --git a/(.+) b/(.+)$", re.MULTILINE)
@@ -60,9 +64,12 @@ class FixService:
         head = await self._head(repository)
         prompt = redact_secrets(
             f"""Generate one minimal unified Git patch for this confirmed Flutter finding.
-Modify only {finding.file}. Preserve behavior unrelated to lifecycle cleanup.
+Modify only {finding.file}. Preserve behavior unrelated to this finding.
 Do not add dependencies. The patch must apply to the exact source below.
+Return the unified diff in `patch_lines`, with one exact diff line per array item.
+Do not place the patch in a multiline JSON string or Markdown fence.
 
+Audit type: {audit.audit_type.value}
 Finding: {finding.title}
 Framework: {finding.framework}
 Evidence: {json.dumps(finding.evidence)}
@@ -75,7 +82,16 @@ SOURCE {finding.file}
         fix_response = await self.providers.generate_json(
             ProviderId(audit.provider), audit.model_id, prompt, FIX_SCHEMA
         )
-        patch = fix_response["patch"].strip()
+        patch_lines = fix_response.get("patch_lines")
+        if not isinstance(patch_lines, list) or not all(
+            isinstance(line, str) for line in patch_lines
+        ):
+            raise FixSafetyError("The model response did not contain a valid patch")
+        if not isinstance(fix_response.get("summary"), str) or not isinstance(
+            fix_response.get("risk"), str
+        ):
+            raise FixSafetyError("The model response did not describe the proposed patch")
+        patch = "\n".join(patch_lines).strip()
         self._validate_patch(repository, patch, allowed_file=finding.file)
         try:
             await self._check_patch(repository, patch)

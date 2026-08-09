@@ -3,21 +3,29 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from perfora import repositories
+from perfora import analyzer_client, repositories
+from perfora.analyzer_client import DartAnalyzerClient
 from perfora.config import Settings
 from perfora.database import AuditStore
 from perfora.domain import (
     AuditRecord,
+    AuditType,
     Finding,
     FixApplyRequest,
     ProviderId,
     RepositorySnapshot,
 )
 from perfora.exports import export_html, export_sarif
-from perfora.fixes import FixSafetyError, FixService
+from perfora.fixes import FIX_SCHEMA, FixSafetyError, FixService
 from perfora.main import app
 from perfora.process import run_process
 from perfora.providers import ProviderRegistry
+from perfora.providers.base import ProviderStructuredOutputError
+from perfora.providers.opencode import (
+    _decode_json_object,
+    _extract_unified_diff,
+    _text_from_json_events,
+)
 from perfora.repositories import inspect_repository, pick_repository_path
 from perfora.security import redact_secrets
 
@@ -123,6 +131,86 @@ def test_redacts_likely_secrets() -> None:
     assert "[REDACTED]" in redacted
 
 
+def test_decodes_opencode_json_from_markdown_or_commentary() -> None:
+    response = """I prepared the requested result.
+```json
+{"summary":"Remove the exception","risk":"low","patch":"diff --git a/file b/file\\n"}
+```
+"""
+
+    decoded = _decode_json_object(response)
+
+    assert decoded["summary"] == "Remove the exception"
+    assert decoded["patch"].startswith("diff --git")
+
+
+def test_reads_text_parts_from_opencode_jsonl_events() -> None:
+    output = """{"type":"step_start","part":{"type":"step-start"}}
+{"type":"text","part":{"type":"text","text":"{\\"summary\\":\\"ok\\"}"}}
+{"type":"step_finish","part":{"type":"step-finish"}}"""
+
+    assert _text_from_json_events(output) == '{"summary":"ok"}'
+
+
+def test_rejects_opencode_output_without_a_json_object() -> None:
+    with pytest.raises(ProviderStructuredOutputError):
+        _decode_json_object("I could not generate the requested patch.")
+
+
+def test_fix_schema_uses_patch_lines_instead_of_a_multiline_json_string() -> None:
+    assert "patch_lines" in FIX_SCHEMA["properties"]
+    assert "patch" not in FIX_SCHEMA["properties"]
+
+
+def test_extracts_a_direct_fenced_unified_diff() -> None:
+    response = """Here is the requested patch:
+```diff
+diff --git a/ios/Runner/Info.plist b/ios/Runner/Info.plist
+--- a/ios/Runner/Info.plist
++++ b/ios/Runner/Info.plist
+@@ -1,2 +1 @@
+-<true/>
++<false/>
+```
+"""
+
+    patch = _extract_unified_diff(response)
+
+    assert patch is not None
+    assert patch.startswith("diff --git")
+    assert patch.endswith("+<false/>")
+
+
+@pytest.mark.asyncio
+async def test_dart_analyzer_selects_the_security_rule_pack(tmp_path: Path, monkeypatch) -> None:
+    analyzer_root = tmp_path / "analyzer"
+    package_config = analyzer_root / ".dart_tool" / "package_config.json"
+    package_config.parent.mkdir(parents=True)
+    package_config.write_text("{}")
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    captured_command: list[str] = []
+
+    async def analyze(command, **_):
+        captured_command.extend(command)
+        return "[]"
+
+    monkeypatch.setattr(analyzer_client.shutil, "which", lambda _: "/usr/bin/dart")
+    monkeypatch.setattr(analyzer_client, "run_process", analyze)
+    client = DartAnalyzerClient(Settings(analyzer_root=analyzer_root))
+
+    assert await client.analyze(repository, AuditType.SECURITY) == []
+    assert captured_command[-2:] == ["--audit-type", "security"]
+
+
+def test_existing_audit_records_default_to_performance(tmp_path: Path) -> None:
+    audit = _audit(tmp_path)
+
+    payload = audit.model_dump(exclude={"audit_type"})
+
+    assert AuditRecord.model_validate(payload).audit_type == AuditType.PERFORMANCE
+
+
 def test_exports_evidence_as_html_and_sarif(tmp_path: Path) -> None:
     audit = _audit(tmp_path)
 
@@ -132,6 +220,7 @@ def test_exports_evidence_as_html_and_sarif(tmp_path: Path) -> None:
     assert "Perfora evidence report" in html
     assert "controller.dart:8" in html
     assert '"ruleId": "lifecycle.missing_cleanup"' in sarif
+    assert '"auditType": "performance"' in sarif
 
 
 def test_rejects_patch_outside_approved_file(tmp_path: Path) -> None:

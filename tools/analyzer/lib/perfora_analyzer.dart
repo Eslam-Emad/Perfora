@@ -10,6 +10,10 @@ import 'package:path/path.dart' as path;
 const _ignoredDirectories = {
   '.git',
   '.dart_tool',
+  '.pub-cache',
+  '.symlinks',
+  'DerivedData',
+  'Pods',
   'build',
   'node_modules',
 };
@@ -20,8 +24,8 @@ const _ignoredSuffixes = {
   '.config.dart',
 };
 
-final class LifecycleFinding {
-  const LifecycleFinding({
+final class AnalyzerFinding {
+  const AnalyzerFinding({
     required this.ruleId,
     required this.title,
     required this.severity,
@@ -63,8 +67,8 @@ final class LifecycleFinding {
 }
 
 final class LifecycleAnalyzer {
-  Future<List<LifecycleFinding>> analyze(Directory root) async {
-    final findings = <LifecycleFinding>[];
+  Future<List<AnalyzerFinding>> analyze(Directory root) async {
+    final findings = <AnalyzerFinding>[];
     await for (final entity in root.list(recursive: true, followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.dart')) continue;
       final relativePath = path.relative(entity.path, from: root.path);
@@ -73,7 +77,8 @@ final class LifecycleAnalyzer {
           _ignoredSuffixes.any(relativePath.endsWith)) {
         continue;
       }
-      final content = await entity.readAsString();
+      final content = await _readTextFile(entity);
+      if (content == null) continue;
       final result = parseString(
         content: content,
         path: entity.path,
@@ -131,7 +136,7 @@ final class _LifecycleVisitor extends RecursiveAstVisitor<void> {
 
   final String file;
   final dynamic lineInfo;
-  final List<LifecycleFinding> findings;
+  final List<AnalyzerFinding> findings;
 
   @override
   void visitClassDeclaration(ClassDeclaration node) {
@@ -160,7 +165,7 @@ final class _LifecycleVisitor extends RecursiveAstVisitor<void> {
         final resolvedType =
             typeName ?? initializerType ?? 'lifecycle resource';
         findings.add(
-          LifecycleFinding(
+          AnalyzerFinding(
             ruleId: 'lifecycle.missing_cleanup',
             title: '$resolvedType is not released',
             severity: resolvedType == 'AnimationController' ? 'high' : 'medium',
@@ -225,5 +230,257 @@ final class _LifecycleVisitor extends RecursiveAstVisitor<void> {
       return 'GetX';
     }
     return 'Flutter';
+  }
+}
+
+final class SecurityAnalyzer {
+  Future<List<AnalyzerFinding>> analyze(Directory root) async {
+    final findings = <AnalyzerFinding>[];
+    await for (final entity in root.list(recursive: true, followLinks: false)) {
+      if (entity is! File) continue;
+      final relativePath = path.relative(entity.path, from: root.path);
+      final parts = path.split(relativePath);
+      if (parts.any(_ignoredDirectories.contains)) continue;
+
+      if (entity.path.endsWith('.dart') &&
+          !_ignoredSuffixes.any(relativePath.endsWith)) {
+        final content = await _readTextFile(entity);
+        if (content == null) continue;
+        final result = parseString(
+          content: content,
+          path: entity.path,
+          throwIfDiagnostics: false,
+        );
+        result.unit.accept(
+          _SecurityVisitor(
+            file: relativePath,
+            lineInfo: result.lineInfo,
+            findings: findings,
+          ),
+        );
+        continue;
+      }
+
+      if (_isAndroidAppManifest(parts)) {
+        final content = await _readTextFile(entity);
+        if (content == null) continue;
+        final match = RegExp(
+          r'''android:usesCleartextTraffic\s*=\s*["']true["']''',
+          caseSensitive: false,
+        ).firstMatch(content);
+        if (match != null) {
+          findings.add(
+            AnalyzerFinding(
+              ruleId: 'security.android.cleartext_traffic',
+              title: 'Android cleartext traffic is enabled',
+              severity: 'high',
+              confidence: 0.99,
+              file: relativePath,
+              line: _lineNumber(content, match.start),
+              symbol: 'android:usesCleartextTraffic',
+              framework: 'Android',
+              evidence: const [
+                'The application manifest explicitly enables cleartext traffic.',
+                'HTTP connections can bypass transport encryption on Android.',
+              ],
+              explanation:
+                  'Allowing cleartext traffic exposes requests and responses to interception or modification on untrusted networks.',
+              recommendation:
+                  'Remove the cleartext opt-in or set it to false. If a development-only endpoint needs HTTP, scope it with a debug-only network security configuration.',
+            ),
+          );
+        }
+        continue;
+      }
+
+      if (_isIosRunnerPlist(parts)) {
+        final content = await _readTextFile(entity);
+        if (content == null) continue;
+        final match = RegExp(
+          r'<key>\s*NSAllowsArbitraryLoads\s*</key>\s*<true\s*/>',
+          caseSensitive: false,
+        ).firstMatch(content);
+        if (match != null) {
+          findings.add(
+            AnalyzerFinding(
+              ruleId: 'security.ios.arbitrary_loads',
+              title: 'iOS App Transport Security is disabled globally',
+              severity: 'high',
+              confidence: 0.99,
+              file: relativePath,
+              line: _lineNumber(content, match.start),
+              symbol: 'NSAllowsArbitraryLoads',
+              framework: 'iOS',
+              evidence: const [
+                'Info.plist sets NSAllowsArbitraryLoads to true.',
+                'The exception applies to every network destination used by the app.',
+              ],
+              explanation:
+                  'A global App Transport Security exception permits insecure network connections throughout the iOS application.',
+              recommendation:
+                  'Remove NSAllowsArbitraryLoads. Use HTTPS everywhere or add the narrowest domain-specific exception only when it is unavoidable.',
+            ),
+          );
+        }
+      }
+    }
+    findings.sort((left, right) {
+      final fileOrder = left.file.compareTo(right.file);
+      return fileOrder == 0 ? left.line.compareTo(right.line) : fileOrder;
+    });
+    return findings;
+  }
+}
+
+final class _SecurityVisitor extends RecursiveAstVisitor<void> {
+  _SecurityVisitor({
+    required this.file,
+    required this.lineInfo,
+    required this.findings,
+  });
+
+  final String file;
+  final dynamic lineInfo;
+  final List<AnalyzerFinding> findings;
+
+  static final _secretName = RegExp(
+    r'(api[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|password|private[_-]?key|secret|token)',
+    caseSensitive: false,
+  );
+  static final _placeholderValue = RegExp(
+    r'^(example|sample|placeholder|replace[_-]?me|your[_-]?|test[_-]?)',
+    caseSensitive: false,
+  );
+
+  @override
+  void visitVariableDeclaration(VariableDeclaration node) {
+    final initializer = node.initializer;
+    if (_secretName.hasMatch(node.name.lexeme) &&
+        initializer is SimpleStringLiteral) {
+      final value = initializer.value.trim();
+      if (value.length >= 8 && !_placeholderValue.hasMatch(value)) {
+        findings.add(
+          AnalyzerFinding(
+            ruleId: 'security.hardcoded_secret',
+            title: 'Sensitive credential is hardcoded in source',
+            severity: 'critical',
+            confidence: 0.96,
+            file: file,
+            line: lineInfo.getLocation(node.offset).lineNumber as int,
+            symbol: node.name.lexeme,
+            framework: 'Dart',
+            evidence: [
+              '`${node.name.lexeme}` is initialized from a non-empty string literal.',
+              'The credential value was intentionally omitted from audit evidence.',
+            ],
+            explanation:
+                'Credentials embedded in application source can be recovered from source control, logs, or compiled application artifacts.',
+            recommendation:
+                'Remove the credential from source, rotate the exposed value, and inject it through an approved secret-management or backend-mediated flow.',
+          ),
+        );
+      }
+    }
+    super.visitVariableDeclaration(node);
+  }
+
+  @override
+  void visitSimpleStringLiteral(SimpleStringLiteral node) {
+    final value = node.value.trim();
+    final uri = Uri.tryParse(value);
+    if (uri != null &&
+        uri.scheme == 'http' &&
+        uri.host.isNotEmpty &&
+        !_isLoopback(uri.host)) {
+      findings.add(
+        AnalyzerFinding(
+          ruleId: 'security.insecure_transport',
+          title: 'Cleartext HTTP endpoint is embedded in source',
+          severity: 'high',
+          confidence: 0.98,
+          file: file,
+          line: lineInfo.getLocation(node.offset).lineNumber as int,
+          symbol: uri.host,
+          framework: 'Dart',
+          evidence: [
+            'A cleartext HTTP URL targets `${uri.host}`.',
+            'The endpoint is not a loopback development address.',
+          ],
+          explanation:
+              'Cleartext HTTP does not protect application traffic from interception or modification in transit.',
+          recommendation:
+              'Use HTTPS with valid certificate verification and update the service endpoint configuration to reject cleartext production traffic.',
+        ),
+      );
+    }
+    super.visitSimpleStringLiteral(node);
+  }
+
+  @override
+  void visitAssignmentExpression(AssignmentExpression node) {
+    final target = node.leftHandSide.toSource();
+    final callback = node.rightHandSide.toSource();
+    final alwaysAccepts = RegExp(r'=>\s*true\b').hasMatch(callback) ||
+        RegExp(r'return\s+true\s*;').hasMatch(callback);
+    if (target.endsWith('badCertificateCallback') && alwaysAccepts) {
+      findings.add(
+        AnalyzerFinding(
+          ruleId: 'security.tls_validation_disabled',
+          title: 'TLS certificate validation is disabled',
+          severity: 'critical',
+          confidence: 0.99,
+          file: file,
+          line: lineInfo.getLocation(node.offset).lineNumber as int,
+          symbol: target,
+          framework: 'Dart',
+          evidence: const [
+            'badCertificateCallback unconditionally returns true.',
+            'Invalid or attacker-controlled certificates will be accepted.',
+          ],
+          explanation:
+              'Accepting every certificate removes server identity verification and enables man-in-the-middle attacks.',
+          recommendation:
+              'Remove the permissive callback and rely on platform certificate validation. For private trust roots, use a narrowly scoped, reviewed trust configuration.',
+        ),
+      );
+    }
+    super.visitAssignmentExpression(node);
+  }
+
+  bool _isLoopback(String host) {
+    final normalized = host.toLowerCase();
+    return normalized == 'localhost' ||
+        normalized == '127.0.0.1' ||
+        normalized == '::1';
+  }
+}
+
+int _lineNumber(String content, int offset) =>
+    '\n'.allMatches(content.substring(0, offset)).length + 1;
+
+bool _isAndroidAppManifest(List<String> parts) {
+  if (parts.length < 5) return false;
+  final offset = parts.length - 5;
+  return parts[offset] == 'android' &&
+      parts[offset + 1] == 'app' &&
+      parts[offset + 2] == 'src' &&
+      parts.last == 'AndroidManifest.xml';
+}
+
+bool _isIosRunnerPlist(List<String> parts) {
+  if (parts.length < 3) return false;
+  final offset = parts.length - 3;
+  return parts[offset] == 'ios' &&
+      parts[offset + 1] == 'Runner' &&
+      parts.last == 'Info.plist';
+}
+
+Future<String?> _readTextFile(File file) async {
+  try {
+    return await file.readAsString();
+  } on FileSystemException {
+    return null;
+  } on FormatException {
+    return null;
   }
 }

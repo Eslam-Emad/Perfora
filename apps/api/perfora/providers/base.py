@@ -10,6 +10,10 @@ class ProviderRequestError(RuntimeError):
     """Sanitized provider failure safe to expose through the local API."""
 
 
+class ProviderStructuredOutputError(RuntimeError):
+    """The provider completed but did not return the requested JSON object."""
+
+
 class ProviderAdapter(ABC):
     id: ProviderId
     locality: str

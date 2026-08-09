@@ -38,6 +38,7 @@ def export_sarif(audit: AuditRecord) -> str:
                     "confidence": finding.confidence,
                     "framework": finding.framework,
                     "status": finding.status,
+                    "auditType": audit.audit_type.value,
                 },
             }
         )
@@ -85,5 +86,5 @@ border:1px solid #d5dfdc;border-radius:18px}}.eyebrow{{color:#147d64;text-transf
 letter-spacing:.12em;font-size:12px;font-weight:700}}code{{background:#edf4f1;padding:3px 6px;border-radius:6px}}
 </style></head><body><header><p class="eyebrow">Perfora evidence report</p>
 <h1>{html.escape(audit.repository.name)}</h1>
-<p>{html.escape(audit.provider.value)}/{html.escape(audit.model_id)} ·
-{html.escape(audit.status)}</p></header>{rows or "<p>No lifecycle findings.</p>"}</body></html>"""
+<p>{html.escape(audit.audit_type.value)} · {html.escape(audit.provider.value)}/{html.escape(audit.model_id)} ·
+{html.escape(audit.status)}</p></header>{rows or f"<p>No {html.escape(audit.audit_type.value)} findings.</p>"}</body></html>"""

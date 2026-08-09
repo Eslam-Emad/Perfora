@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="JAVA_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <exclude-output />
+    <content url="file://$MODULE_DIR$">
+      <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/build" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/test/fixtures/clean_app/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/test/fixtures/clean_app/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/test/fixtures/clean_app/build" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/test/fixtures/lifecycle_app/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/test/fixtures/lifecycle_app/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/tools/analyzer/test/fixtures/lifecycle_app/build" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

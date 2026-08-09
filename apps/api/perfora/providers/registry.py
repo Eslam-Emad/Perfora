@@ -5,7 +5,7 @@ from typing import Any
 
 from ..config import Settings
 from ..domain import ProviderCatalog, ProviderId
-from .base import ProviderAdapter, ProviderRequestError
+from .base import ProviderAdapter, ProviderRequestError, ProviderStructuredOutputError
 from .ollama import OllamaAdapter
 from .openai import OpenAIAdapter
 from .opencode import OpenCodeAdapter
@@ -37,6 +37,10 @@ class ProviderRegistry:
     ) -> dict[str, Any]:
         try:
             return await self.adapter(provider).generate_json(model_id, prompt, schema)
+        except ProviderStructuredOutputError as error:
+            raise ProviderRequestError(
+                f"{provider.value}/{model_id} returned invalid structured output"
+            ) from error
         # Provider libraries and local CLIs expose different exception trees.
         # Normalize them here so API routes never leak raw response bodies.
         except Exception as error:

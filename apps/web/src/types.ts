@@ -1,4 +1,5 @@
 export type ProviderId = "opencode" | "ollama" | "openai";
+export type AuditType = "performance" | "security";
 
 export interface ToolStatus {
   id: string;
@@ -78,6 +79,7 @@ export interface AuditRecord {
   repository: RepositorySnapshot;
   provider: ProviderId;
   model_id: string;
+  audit_type: AuditType;
   model_metadata: Record<string, unknown>;
   status: "queued" | "running" | "partial" | "completed" | "failed" | "cancelled";
   created_at: string;
@@ -96,4 +98,3 @@ export interface FixProposal {
   patch: string;
   expected_head: string;
 }
-

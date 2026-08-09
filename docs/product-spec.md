@@ -3,8 +3,8 @@
 ## Promise
 
 Given a local Flutter repository and one explicitly selected model, Perfora
-produces an evidence-backed static performance audit and can apply one reviewed,
-recoverable fix.
+produces an evidence-backed static performance or security audit and can apply
+one reviewed, recoverable fix.
 
 ## Fixed decisions
 
@@ -22,6 +22,9 @@ recoverable fix.
   versions, and a source fingerprint.
 - Riverpod, Provider, Bloc/Cubit, and GetX must satisfy a shared lifecycle-rule
   contract before being advertised as supported.
+- Security audits deterministically cover hardcoded credentials, cleartext URLs,
+  unconditional certificate acceptance, Android cleartext policy, and iOS App
+  Transport Security exceptions. Secret values never enter finding evidence.
 - No unsupported overall performance score. The UI reports evidence, severity,
   confidence, coverage, and verification state.
 - Apply Fix is per-finding: generate, preview, approve, checkpoint, apply,
@@ -39,10 +42,11 @@ recoverable fix.
 ```text
 Setup health
 → Add repository
+→ Select performance or security audit flow
 → Select provider/model
 → Start audit
 → Stream deterministic analysis
-→ Inspect lifecycle finding and evidence
+→ Inspect the selected flow's findings, evidence, and recommendations
 → Generate fix
 → Review exact patch
 → Approve on clean worktree
@@ -57,4 +61,3 @@ Setup health
 - Batch or autonomous patch application.
 - Concurrent audit execution.
 - Linux or Windows certification.
-

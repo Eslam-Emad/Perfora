@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 from .config import Settings
+from .domain import AuditType
 from .process import ProcessError, run_process
 
 
@@ -16,7 +17,7 @@ class DartAnalyzerClient:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    async def analyze(self, repository: Path) -> list[dict]:
+    async def analyze(self, repository: Path, audit_type: AuditType) -> list[dict]:
         dart = shutil.which("dart")
         if not dart:
             raise AnalyzerUnavailable("Dart SDK was not found")
@@ -32,6 +33,8 @@ class DartAnalyzerClient:
                     "bin/perfora_analyzer.dart",
                     "--root",
                     str(repository),
+                    "--audit-type",
+                    audit_type.value,
                 ],
                 cwd=self.settings.analyzer_root,
                 timeout=120,

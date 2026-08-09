@@ -1,5 +1,6 @@
 import type {
   AuditRecord,
+  AuditType,
   FixProposal,
   ProviderCatalog,
   ProviderId,
@@ -46,6 +47,7 @@ export const api = {
     repository_path: string;
     provider: ProviderId;
     model_id: string;
+    audit_type: AuditType;
     remote_source_consent: boolean;
   }) =>
     request<AuditRecord>("/api/audits", {

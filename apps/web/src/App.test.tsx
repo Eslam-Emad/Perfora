@@ -112,6 +112,55 @@ describe("Perfora shell", () => {
     expect(screen.getByRole("button", { name: "Start audit" })).toBeEnabled();
   });
 
+  it("creates a security audit with the selected security rule pack", async () => {
+    let createdBody: Record<string, unknown> | undefined;
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      const requestPath = String(input);
+      if (requestPath.endsWith("/api/setup")) return jsonResponse(setup);
+      if (requestPath.endsWith("/api/repositories/validate")) {
+        return jsonResponse(flutterProject);
+      }
+      if (requestPath.endsWith("/api/audits") && init?.method === "POST") {
+        createdBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse({
+          id: "security-audit",
+          repository: flutterProject,
+          provider: "ollama",
+          model_id: "qwen2.5-coder:7b",
+          audit_type: "security",
+          model_metadata: {},
+          status: "completed",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          findings: [],
+          events: [],
+          context_manifest: [],
+        });
+      }
+      return jsonResponse({ audits: [] });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Repositories" }));
+    fireEvent.change(screen.getByLabelText("Static project path"), {
+      target: { value: flutterProject.path },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add path" }));
+    await screen.findByText("Validated Flutter repository");
+    fireEvent.click(screen.getAllByRole("button", { name: "New audit" }).at(-1)!);
+    fireEvent.click(screen.getByRole("button", { name: /Application security/ }));
+
+    expect(screen.getByText("5 rules")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Ollama 1 models/ }));
+    fireEvent.change(screen.getByLabelText("Model"), {
+      target: { value: "qwen2.5-coder:7b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start audit" }));
+
+    expect(await screen.findByText("Security evidence audit")).toBeInTheDocument();
+    expect(createdBody?.audit_type).toBe("security");
+  });
+
   it("revalidates a saved project and keeps its error beside that control", async () => {
     window.localStorage.setItem(
       "perfora.projects",

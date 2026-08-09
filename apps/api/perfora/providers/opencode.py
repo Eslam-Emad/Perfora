@@ -6,7 +6,53 @@ from typing import Any
 
 from ..domain import ModelInfo, ProviderCatalog, ProviderId
 from ..process import ProcessError, run_process
-from .base import ProviderAdapter
+from .base import ProviderAdapter, ProviderStructuredOutputError
+
+
+def _text_from_json_events(output: str) -> str:
+    chunks: list[str] = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        part = event.get("part", {})
+        if part.get("type") == "text" and part.get("text"):
+            chunks.append(part["text"])
+        elif event.get("type") == "text" and event.get("text"):
+            chunks.append(event["text"])
+    return "".join(chunks).strip()
+
+
+def _decode_json_object(text: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ProviderStructuredOutputError("OpenCode returned no valid JSON object")
+
+
+def _extract_unified_diff(text: str) -> str | None:
+    lines = text.splitlines()
+    start = next(
+        (index for index, line in enumerate(lines) if line.startswith("diff --git ")), None
+    )
+    if start is None:
+        return None
+    patch_lines: list[str] = []
+    for line in lines[start:]:
+        if line.startswith("```") or line.rstrip() == '"}':
+            break
+        if patch_lines and not line.startswith((" ", "+", "-", "\\", "@", "index ", "diff ")):
+            break
+        patch_lines.append(line)
+    return "\n".join(patch_lines).strip() or None
 
 
 class OpenCodeAdapter(ProviderAdapter):
@@ -70,8 +116,10 @@ class OpenCodeAdapter(ProviderAdapter):
         if not executable:
             raise RuntimeError("OpenCode CLI was not found")
         schema_prompt = (
-            f"{prompt}\n\nReturn only JSON matching this JSON Schema:\n"
-            f"{json.dumps(schema, separators=(',', ':'))}"
+            f"{prompt}\n\nReturn exactly one JSON object matching this JSON Schema:\n"
+            f"{json.dumps(schema, separators=(',', ':'))}\n"
+            "Do not use Markdown fences or add commentary. The response must be valid JSON. "
+            "Escape every newline inside a string value as \\n."
         )
         output = await run_process(
             [
@@ -86,18 +134,17 @@ class OpenCodeAdapter(ProviderAdapter):
             ],
             timeout=180,
         )
-        chunks: list[str] = []
-        for line in output.splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            part = event.get("part", {})
-            if part.get("type") == "text" and part.get("text"):
-                chunks.append(part["text"])
-            elif event.get("type") == "text" and event.get("text"):
-                chunks.append(event["text"])
-        text = "".join(chunks).strip()
-        if text.startswith("```"):
-            text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        return json.loads(text)
+        text = _text_from_json_events(output)
+        try:
+            return _decode_json_object(text)
+        except ProviderStructuredOutputError:
+            if "patch_lines" not in schema.get("properties", {}):
+                raise
+            patch = _extract_unified_diff(text)
+            if not patch:
+                raise
+            return {
+                "summary": "OpenCode generated a patch for review",
+                "risk": "Review the exact diff before applying",
+                "patch_lines": patch.splitlines(),
+            }

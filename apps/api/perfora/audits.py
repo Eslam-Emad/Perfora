@@ -67,6 +67,7 @@ class AuditCoordinator:
             repository=repository,
             provider=request.provider,
             model_id=request.model_id,
+            audit_type=request.audit_type,
             model_metadata=model_metadata,
             status="queued",
         )
@@ -112,7 +113,9 @@ class AuditCoordinator:
         self._append_event(audit, "started", "Inspecting repository evidence", 10)
         await self._persist_and_notify(audit)
         try:
-            raw_findings = await self.analyzer.analyze(Path(audit.repository.path))
+            raw_findings = await self.analyzer.analyze(
+                Path(audit.repository.path), audit.audit_type
+            )
         except AnalyzerUnavailable as error:
             audit.status = "failed"
             audit.error = str(error)
@@ -130,7 +133,7 @@ class AuditCoordinator:
         self._append_event(
             audit,
             "evidence_ready",
-            f"Found {len(audit.findings)} lifecycle issue(s)",
+            f"Found {len(audit.findings)} {audit.audit_type.value} issue(s)",
             55,
             {"finding_count": len(audit.findings)},
         )
@@ -138,7 +141,12 @@ class AuditCoordinator:
 
         if not audit.findings:
             audit.status = "completed"
-            self._append_event(audit, "completed", "No lifecycle findings detected", 100)
+            self._append_event(
+                audit,
+                "completed",
+                f"No {audit.audit_type.value} findings detected",
+                100,
+            )
             await self._persist_and_notify(audit)
             return
 
@@ -176,7 +184,7 @@ class AuditCoordinator:
     def _enrichment_prompt(self, audit: AuditRecord, finding: Finding) -> str:
         evidence = "\n".join(f"- {redact_secrets(item)}" for item in finding.evidence)
         return redact_secrets(
-            f"""You are Perfora's evidence-bound Flutter performance reviewer.
+            f"""You are Perfora's evidence-bound Flutter {audit.audit_type.value} reviewer.
 Explain only the confirmed finding below. Do not invent runtime measurements.
 
 Framework: {finding.framework}
