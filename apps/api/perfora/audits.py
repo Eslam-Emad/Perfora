@@ -19,6 +19,7 @@ from .domain import (
 from .fingerprints import finding_fingerprint, fingerprint_basis
 from .providers import ProviderRegistry
 from .security import redact_secrets
+from .supply_chain import inventory_dependencies
 
 ENRICHMENT_SCHEMA = {
     "type": "object",
@@ -128,6 +129,8 @@ class AuditCoordinator:
         audit.analyzer_version = analysis.analyzer_version
         audit.rule_pack = analysis.rule_pack
         audit.scan_coverage = analysis.coverage
+        if audit.audit_type.value == "security":
+            audit.dependency_inventory = inventory_dependencies(Path(audit.repository.path))
         fingerprint_occurrences: dict[str, int] = {}
         for raw in analysis.findings:
             fingerprint_basis = self._fingerprint_basis(raw)
@@ -154,6 +157,7 @@ class AuditCoordinator:
                 "new_findings": len(comparison.new_finding_ids),
                 "regressed_findings": len(comparison.regressed_finding_ids),
                 "resolved_findings": len(comparison.resolved_findings),
+                "dependency_components": len(audit.dependency_inventory.components),
             },
         )
         await self._persist_and_notify(audit)

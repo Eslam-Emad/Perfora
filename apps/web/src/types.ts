@@ -118,6 +118,12 @@ export interface Finding {
   evidence: string[];
   explanation: string;
   recommendation: string;
+  control_group?: string;
+  platforms?: string[];
+  standards?: SecurityStandardReference[];
+  detection_limitations?: string[];
+  manual_verification?: string[];
+  false_positive_guidance?: string;
   model_enrichment?: ModelEnrichment;
   triage_status: TriageStatus;
   comparison_status?: ComparisonStatus;
@@ -134,6 +140,35 @@ export interface Finding {
   verification_attempts?: VerificationAttempt[];
 }
 
+export interface SecurityStandardReference {
+  id: string;
+  title: string;
+  url: string;
+}
+
+export interface DependencyComponent {
+  bom_ref: string;
+  name: string;
+  version: string;
+  ecosystem: string;
+  source_file: string;
+  scope: "required" | "optional" | "excluded" | "unknown";
+  direct?: boolean;
+  purl?: string;
+  license?: string;
+  privacy_category?: string;
+  privacy_sensitive: boolean;
+}
+
+export interface DependencyInventory {
+  components: DependencyComponent[];
+  manifests: string[];
+  coverage_by_ecosystem: Record<string, number>;
+  license_counts: Record<string, number>;
+  privacy_sdk_counts: Record<string, number>;
+  vulnerability_matching: "not_requested" | "disabled" | "completed";
+}
+
 export interface RulePackMetadata {
   id: string;
   version: string;
@@ -148,6 +183,8 @@ export interface ScanCoverage {
   rules_executed: string[];
   scanned_files?: string[];
   skipped_files_by_reason?: Record<string, string[]>;
+  coverage_by_platform?: Record<string, number>;
+  rules_by_control_group?: Record<string, string[]>;
 }
 
 export interface AuditEvent {
@@ -177,6 +214,7 @@ export interface AuditRecord {
   rule_pack?: RulePackMetadata;
   scan_coverage?: ScanCoverage;
   baseline_audit_id?: string;
+  dependency_inventory?: DependencyInventory;
 }
 
 export interface AgentPrompt {
@@ -214,4 +252,14 @@ export interface AuditComparison {
   regressed_finding_ids: string[];
   severity_changes: SeverityChange[];
   resolved_findings: Finding[];
+  dependency_changes?: {
+    added: DependencyComponent[];
+    removed: DependencyComponent[];
+    updated: Array<{
+      ecosystem: string;
+      name: string;
+      from_version: string;
+      to_version: string;
+    }>;
+  };
 }

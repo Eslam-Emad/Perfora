@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import uuid
 from collections.abc import Iterable
 
 
@@ -20,7 +21,11 @@ def export_ci_sarif(report: dict) -> str:
             "name": finding["title"],
             "shortDescription": {"text": finding["explanation"]},
             "help": {"text": finding["recommendation"]},
-            "properties": {"version": finding["rule_version"]},
+            "properties": {
+                "version": finding["rule_version"],
+                "controlGroup": finding.get("control_group"),
+                "standards": [item["id"] for item in finding.get("standards", [])],
+            },
         }
         result = {
             "ruleId": rule_id,
@@ -44,6 +49,12 @@ def export_ci_sarif(report: dict) -> str:
                 "ruleVersion": finding["rule_version"],
                 "suppressed": finding.get("suppressed", False),
                 "suppressionExpires": finding.get("suppression_expires"),
+                "controlGroup": finding.get("control_group"),
+                "platforms": finding.get("platforms", []),
+                "standards": finding.get("standards", []),
+                "detectionLimitations": finding.get("detection_limitations", []),
+                "manualVerification": finding.get("manual_verification", []),
+                "falsePositiveGuidance": finding.get("false_positive_guidance"),
             },
         }
         if report["repository"].get("baseline_ref"):
@@ -73,6 +84,77 @@ def export_ci_sarif(report: dict) -> str:
                 "results": results,
             }
         ],
+    }
+    return json.dumps(payload, indent=2)
+
+
+def export_cyclonedx(report: dict) -> str:
+    inventory = report.get("dependency_inventory", {})
+    components = []
+    refs = []
+    for component in inventory.get("components", []):
+        item = {
+            "type": "library",
+            "bom-ref": component["bom_ref"],
+            "name": component["name"],
+            "version": component["version"],
+            "scope": component["scope"] if component["scope"] != "unknown" else "required",
+            "properties": [
+                {"name": "perfora:ecosystem", "value": component["ecosystem"]},
+                {"name": "perfora:source-file", "value": component["source_file"]},
+                {
+                    "name": "perfora:license-status",
+                    "value": component.get("license") or "unknown",
+                },
+                {
+                    "name": "perfora:privacy-sensitive",
+                    "value": str(component.get("privacy_sensitive", False)).lower(),
+                },
+            ],
+        }
+        if component.get("purl"):
+            item["purl"] = component["purl"]
+        if component.get("license"):
+            item["licenses"] = [{"license": {"name": component["license"]}}]
+        if component.get("privacy_category"):
+            item["properties"].append(
+                {"name": "perfora:privacy-category", "value": component["privacy_category"]}
+            )
+        components.append(item)
+        refs.append(component["bom_ref"])
+
+    repository = report["repository"]
+    root_ref = f"application:{repository['name']}"
+    serial_seed = "\0".join(
+        [repository["path"], repository.get("commit") or "working-tree", report["generated_at"]]
+    )
+    payload = {
+        "$schema": "https://cyclonedx.org/schema/bom-1.7.schema.json",
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.7",
+        "serialNumber": f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, serial_seed)}",
+        "version": 1,
+        "metadata": {
+            "timestamp": report["generated_at"],
+            "tools": {
+                "components": [
+                    {
+                        "type": "application",
+                        "name": "Perfora",
+                        "version": report["tool"]["version"],
+                    }
+                ]
+            },
+            "component": {
+                "type": "application",
+                "bom-ref": root_ref,
+                "name": repository["name"],
+                "version": repository.get("commit") or "working-tree",
+            },
+        },
+        "components": components,
+        "dependencies": [{"ref": root_ref, "dependsOn": refs}],
+        "compositions": [{"aggregate": "unknown", "assemblies": [root_ref]}],
     }
     return json.dumps(payload, indent=2)
 
@@ -151,6 +233,7 @@ def render_ci_report(report: dict, output_format: str) -> str:
         "json": export_ci_json,
         "sarif": export_ci_sarif,
         "html": export_ci_html,
+        "cyclonedx": export_cyclonedx,
     }
     return exporters[output_format](report)
 

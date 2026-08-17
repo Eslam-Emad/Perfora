@@ -92,7 +92,14 @@ operational failures and should not be interpreted as a clean audit.
 - SARIF 2.1.0 uses repository-relative artifact URIs, stable partial
   fingerprints, baseline states, external suppressions, and rule metadata.
 - HTML is a portable human-readable evidence report.
+- CycloneDX emits a local-only 1.7 SBOM with purls where versions are known,
+  source-manifest provenance, available license evidence, and privacy-category
+  properties. Use `--format cyclonedx --output artifacts/perfora.cdx.json`.
 - `--summary` independently writes a compact Markdown job/merge-request summary.
+
+The JSON report also contains `dependency_changes` with added, removed, and
+version-changed components when `--baseline` is supplied. Vulnerability matching
+remains `not_requested`; generating any format performs no online lookup.
 
 ## Monorepos
 

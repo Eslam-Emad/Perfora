@@ -7,11 +7,13 @@ from .domain import (
     AuditComparison,
     AuditRecord,
     ComparisonStatus,
+    DependencyInventory,
     Finding,
     FindingStatusChange,
     SeverityChange,
     TriageStatus,
 )
+from .supply_chain import compare_dependencies
 
 
 class ComparisonError(ValueError):
@@ -110,11 +112,21 @@ class AuditComparisonService:
             return AuditComparison(
                 current_audit_id=current.id,
                 new_finding_ids=[finding.id for finding in current.findings],
+                dependency_changes=compare_dependencies(
+                    current.dependency_inventory,
+                    DependencyInventory(),
+                ),
             )
 
         baseline_map = self._by_fingerprint(baseline.findings)
         older_fingerprints = set(self._older_findings(current, baseline))
-        result = AuditComparison(current_audit_id=current.id, baseline_audit_id=baseline.id)
+        result = AuditComparison(
+            current_audit_id=current.id,
+            baseline_audit_id=baseline.id,
+            dependency_changes=compare_dependencies(
+                current.dependency_inventory, baseline.dependency_inventory
+            ),
+        )
         for fingerprint, finding in current_map.items():
             previous = baseline_map.get(fingerprint)
             if previous is None:

@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-CURRENT_AUDIT_RECORD_VERSION = 4
+CURRENT_AUDIT_RECORD_VERSION = 5
 
 
 def utc_now() -> datetime:
@@ -121,6 +121,8 @@ class ScanCoverage(BaseModel):
     rules_executed: list[str] = Field(default_factory=list)
     scanned_files: list[str] | None = None
     skipped_files_by_reason: dict[str, list[str]] | None = None
+    coverage_by_platform: dict[str, int] = Field(default_factory=dict)
+    rules_by_control_group: dict[str, list[str]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_totals(self) -> ScanCoverage:
@@ -145,6 +147,48 @@ class ModelEnrichment(BaseModel):
     explanation: str
     recommendation: str | None = None
     generated_at: datetime = Field(default_factory=utc_now)
+
+
+class SecurityStandardReference(BaseModel):
+    id: str
+    title: str
+    url: str
+
+
+class DependencyComponent(BaseModel):
+    bom_ref: str
+    name: str
+    version: str = "unknown"
+    ecosystem: str
+    source_file: str
+    scope: Literal["required", "optional", "excluded", "unknown"] = "unknown"
+    direct: bool | None = None
+    purl: str | None = None
+    license: str | None = None
+    privacy_category: str | None = None
+    privacy_sensitive: bool = False
+
+
+class DependencyInventory(BaseModel):
+    components: list[DependencyComponent] = Field(default_factory=list)
+    manifests: list[str] = Field(default_factory=list)
+    coverage_by_ecosystem: dict[str, int] = Field(default_factory=dict)
+    license_counts: dict[str, int] = Field(default_factory=dict)
+    privacy_sdk_counts: dict[str, int] = Field(default_factory=dict)
+    vulnerability_matching: Literal["not_requested", "disabled", "completed"] = "not_requested"
+
+
+class DependencyVersionChange(BaseModel):
+    ecosystem: str
+    name: str
+    from_version: str
+    to_version: str
+
+
+class DependencyChangeReport(BaseModel):
+    added: list[DependencyComponent] = Field(default_factory=list)
+    removed: list[DependencyComponent] = Field(default_factory=list)
+    updated: list[DependencyVersionChange] = Field(default_factory=list)
 
 
 class VerificationAttempt(BaseModel):
@@ -195,6 +239,12 @@ class Finding(BaseModel):
     evidence: list[str]
     explanation: str
     recommendation: str
+    control_group: str | None = None
+    platforms: list[str] = Field(default_factory=list)
+    standards: list[SecurityStandardReference] = Field(default_factory=list)
+    detection_limitations: list[str] = Field(default_factory=list)
+    manual_verification: list[str] = Field(default_factory=list)
+    false_positive_guidance: str | None = None
     model_enrichment: ModelEnrichment | None = None
     triage_status: TriageStatus = TriageStatus.NEW
     comparison_status: ComparisonStatus | None = None
@@ -254,6 +304,7 @@ class AuditRecord(BaseModel):
     rule_pack: RulePackMetadata = Field(default_factory=RulePackMetadata)
     scan_coverage: ScanCoverage = Field(default_factory=ScanCoverage)
     baseline_audit_id: str | None = None
+    dependency_inventory: DependencyInventory = Field(default_factory=DependencyInventory)
 
 
 class AnalyzerResult(BaseModel):
@@ -298,3 +349,4 @@ class AuditComparison(BaseModel):
     regressed_finding_ids: list[str] = Field(default_factory=list)
     severity_changes: list[SeverityChange] = Field(default_factory=list)
     resolved_findings: list[Finding] = Field(default_factory=list)
+    dependency_changes: DependencyChangeReport = Field(default_factory=DependencyChangeReport)

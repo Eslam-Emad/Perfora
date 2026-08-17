@@ -24,6 +24,7 @@ from perfora.domain import (
     RepositorySnapshot,
     RulePackMetadata,
     ScanCoverage,
+    SecurityStandardReference,
     TriageStatus,
     VerificationOutcome,
 )
@@ -290,7 +291,7 @@ def test_database_migrates_and_loads_a_legacy_audit(tmp_path: Path) -> None:
 
     assert store.schema_version == DATABASE_SCHEMA_VERSION
     assert loaded is not None
-    assert loaded.record_version == 4
+    assert loaded.record_version == 5
     assert loaded.analyzer_version == "unknown"
     assert loaded.findings[0].rule_version == "legacy"
     assert loaded.findings[0].model_enrichment is not None
@@ -333,6 +334,18 @@ def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
         explanation="The model confirmed the ownership gap.",
         recommendation="Use the existing owner cleanup hook.",
     )
+    audit.findings[0].control_group = "MASVS-STORAGE"
+    audit.findings[0].platforms = ["Dart", "Android", "iOS"]
+    audit.findings[0].standards = [
+        SecurityStandardReference(
+            id="MASVS-STORAGE-1",
+            title="Secure storage of sensitive data",
+            url="https://mas.owasp.org/MASVS/controls/MASVS-STORAGE-1/",
+        )
+    ]
+    audit.findings[0].detection_limitations = ["Static source evidence only."]
+    audit.findings[0].manual_verification = ["Inspect the release artifact."]
+    audit.findings[0].false_positive_guidance = "Prove the value is not sensitive."
     store.save(audit)
 
     result = PromptService(store).build(audit.id, audit.findings[0].id)
@@ -347,6 +360,12 @@ def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
     assert "Rule ID: lifecycle.missing_cleanup" in result.prompt
     assert "Stable fingerprint: sha256:fixture" in result.prompt
     assert "Rule version: 1.0.0" in result.prompt
+    assert "Control group: MASVS-STORAGE" in result.prompt
+    assert "Platforms: Dart, Android, iOS" in result.prompt
+    assert "MASVS-STORAGE-1: Secure storage of sensitive data" in result.prompt
+    assert "Static source evidence only." in result.prompt
+    assert "Inspect the release artifact." in result.prompt
+    assert "False-positive guidance: Prove the value is not sensitive." in result.prompt
     assert "Triage status: new" in result.prompt
     assert "Baseline audit ID: none" in result.prompt
     assert "No triage notes recorded" in result.prompt

@@ -18,9 +18,30 @@ The recorded `scan_coverage` object is the authoritative per-run result.
 | Rule pack | Inspected inputs | Deterministic coverage |
 | --- | --- | --- |
 | `performance@1.0.0` | Supported Dart source | Owned lifecycle resources without matching cleanup |
-| `security@1.0.0` | Supported Dart source | Hardcoded credential literals, non-loopback HTTP URLs, unconditional certificate acceptance |
-| `security@1.0.0` | `android/app/src/*/AndroidManifest.xml` | Explicit `usesCleartextTraffic=true` |
-| `security@1.0.0` | `ios/Runner/Info.plist` | Explicit global `NSAllowsArbitraryLoads=true` |
+| `security@2.0.0` | Supported Dart source | Credentials, cleartext URLs, certificate acceptance, sensitive logging/storage/clipboard use, WebView options, weak crypto, randomness, and screenshot heuristics |
+| `security@2.0.0` | `android/app/src/*/AndroidManifest.xml` | Cleartext, backup/debug flags, exported components, selected high-impact permissions, and HTTP deep links |
+| `security@2.0.0` | `ios/Runner/Info.plist`, `ios/**/*.entitlements` | Global ATS exception, selected privacy capabilities, custom URL schemes, and debugger entitlement |
+
+Every security rule carries its OWASP control group, platform applicability,
+references, limitations, manual verification, and false-positive guidance. See
+[mobile security rules](./security-rules.md). Coverage is shown by control group
+and platform; Perfora deliberately provides no aggregate security score.
+
+## Dependency and privacy inventory
+
+| Ecosystem | Inputs | Recorded evidence |
+| --- | --- | --- |
+| Dart/Flutter | `pubspec.lock`, `.flutter-plugins-dependencies` | Name, version where available, direct/dev scope, purl, plugin presence |
+| Android | `gradle.lockfile`, `build.gradle`, `build.gradle.kts` | Maven coordinate, version, source manifest |
+| CocoaPods | `Podfile.lock`, local podspec JSON | Pod/subspec, version, locally declared license where available |
+| Swift Package Manager | `Package.resolved` | Identity and pinned version/revision |
+| Bundled Apple frameworks | `.framework`, `.xcframework` directories | Bundle name and repository-relative location |
+
+License values are reported only when local package metadata provides evidence;
+otherwise they remain `unknown`. Privacy categories are transparent name-based
+inventory hints, not claims about runtime collection. CycloneDX uses schema 1.7
+and marks composition completeness `unknown`. Online vulnerability matching is
+not performed.
 
 The analyzer version is stored separately from the rule-pack version. Updating
 the implementation does not silently change the version attached to old audits.
@@ -37,7 +58,7 @@ the implementation does not silently change the version attached to old audits.
 
 Every skipped file contributes to `files_skipped` and exactly one
 `skipped_by_reason` counter. Scanned files are grouped in `scanned_by_type`.
-Analyzer `0.3` also records every repository-relative scanned path and skipped
+Analyzer `0.5` also records every repository-relative scanned path and skipped
 path grouped by reason. These per-file manifests are required before Perfora can
 certify a resolved finding.
 
@@ -95,7 +116,8 @@ secrets are redacted before the prompt reaches the browser. Prompt generation:
 - Native Kotlin, Java, Swift, or Objective-C source analysis
 - Android network-security-config interpretation
 - Domain-specific iOS transport-exception validation
-- Dependency vulnerability or license analysis
+- Online dependency vulnerability matching
+- Complete license identification when local metadata is unavailable
 - Built application artifact analysis
 - Automatic remediation or patch application
 

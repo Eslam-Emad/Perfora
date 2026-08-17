@@ -8,13 +8,14 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from . import __version__
 from .analyzer_client import DartAnalyzerClient
 from .audits import AuditCoordinator
 from .comparisons import AuditComparisonService, ComparisonError
 from .config import settings
 from .database import AuditStore
 from .domain import AuditCreate, FindingUpdate, RepositoryRequest
-from .exports import export_html, export_json, export_sarif
+from .exports import export_audit_cyclonedx, export_html, export_json, export_sarif
 from .findings import FindingService, FindingUpdateError
 from .prompts import PromptBuildError, PromptService
 from .providers import ProviderRegistry
@@ -44,7 +45,7 @@ async def lifespan(_: FastAPI):
     await coordinator.stop()
 
 
-app = FastAPI(title="Perfora API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Perfora API", version=__version__, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -56,7 +57,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"name": "Perfora", "status": "ready", "version": "0.2.0"}
+    return {"name": "Perfora", "status": "ready", "version": __version__}
 
 
 @app.get("/api/setup")
@@ -184,15 +185,23 @@ async def stream_audit_events(audit_id: str):
 
 
 @app.get("/api/audits/{audit_id}/export")
-async def export_audit(audit_id: str, format: str = Query(pattern="^(json|html|sarif)$")):
+async def export_audit(
+    audit_id: str, format: str = Query(pattern="^(json|html|sarif|cyclonedx)$")
+):
     audit = store.get(audit_id)
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
-    exporters = {"json": export_json, "html": export_html, "sarif": export_sarif}
+    exporters = {
+        "json": export_json,
+        "html": export_html,
+        "sarif": export_sarif,
+        "cyclonedx": export_audit_cyclonedx,
+    }
     media_types = {
         "json": "application/json",
         "html": "text/html",
         "sarif": "application/sarif+json",
+        "cyclonedx": "application/vnd.cyclonedx+json; version=1.7",
     }
     return PlainTextResponse(exporters[format](audit), media_type=media_types[format])
 

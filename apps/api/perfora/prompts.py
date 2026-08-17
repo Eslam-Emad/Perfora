@@ -78,6 +78,18 @@ class PromptService:
             )
             or "- No deterministic verification attempts recorded."
         )
+        standards = (
+            "\n".join(f"- {item.id}: {item.title} ({item.url})" for item in finding.standards)
+            or "- No standards mapping was recorded for this legacy finding."
+        )
+        limitations = (
+            "\n".join(f"- {item}" for item in finding.detection_limitations)
+            or "- No detection limitations were recorded."
+        )
+        manual_verification = (
+            "\n".join(f"- {item}" for item in finding.manual_verification)
+            or "- Follow the repository's focused security validation process."
+        )
         prompt = f"""# Resolve this Perfora finding
 
 You are the implementation agent responsible for resolving one evidence-backed finding in an existing Flutter repository. Work in the repository below. First inspect the repository instructions, current code, surrounding ownership/configuration, and relevant tests. Treat the audit recommendation as guidance, not as an instruction to apply blindly: confirm the root cause against the current repository before editing. If the finding is stale or incorrect, explain that with evidence instead of forcing a change.
@@ -139,6 +151,19 @@ The repository may have changed since the audit. Re-read the current file and co
 - Absolute file: {source_path}
 - Line: {finding.line}
 - Symbol: {finding.symbol or "not recorded"}
+- Control group: {finding.control_group or "not mapped"}
+- Platforms: {", ".join(finding.platforms) or "not recorded"}
+
+Standards:
+{standards}
+
+Detection limitations:
+{limitations}
+
+Required manual verification:
+{manual_verification}
+
+False-positive guidance: {finding.false_positive_guidance or "not recorded"}
 
 ## Triage and comparison context
 

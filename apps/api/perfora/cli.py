@@ -15,10 +15,11 @@ from . import __version__
 from .analyzer_client import AnalyzerTimeout, AnalyzerUnavailable, DartAnalyzerClient
 from .ci_report import export_ci_markdown, render_ci_report
 from .config import settings
-from .domain import AnalyzerResult, AuditType
+from .domain import AnalyzerResult, AuditType, DependencyInventory
 from .fingerprints import assign_fingerprints
 from .policy import PolicyError, RepositoryPolicy, Severity, load_policy
 from .repositories import inspect_repository
+from .supply_chain import compare_dependencies, inventory_dependencies
 
 EXIT_SUCCESS = 0
 EXIT_POLICY_VIOLATION = 1
@@ -54,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument(
         "--format",
         dest="output_format",
-        choices=["json", "html", "sarif"],
+        choices=["json", "html", "sarif", "cyclonedx"],
         default="json",
     )
     audit.add_argument("--output", help="Artifact path; defaults to stdout")
@@ -141,7 +142,9 @@ async def _run_audit(args: argparse.Namespace) -> int:
         exclude_paths,
         args.timeout,
     )
+    current_inventory = inventory_dependencies(repository)
     baseline_results: list[tuple[AuditType, AnalyzerResult]] = []
+    baseline_inventory = DependencyInventory()
     baseline_commit: str | None = None
     if args.baseline:
         with archived_git_ref(repository, args.baseline) as (baseline_root, baseline_commit):
@@ -153,6 +156,7 @@ async def _run_audit(args: argparse.Namespace) -> int:
                 exclude_paths,
                 args.timeout,
             )
+            baseline_inventory = inventory_dependencies(baseline_root)
 
     report = _build_report(
         repository=repository,
@@ -166,6 +170,8 @@ async def _run_audit(args: argparse.Namespace) -> int:
         only_new=only_new,
         policy=policy,
         config_path=policy_path if policy_path.exists() else None,
+        current_inventory=current_inventory,
+        baseline_inventory=baseline_inventory,
     )
     artifact = render_ci_report(report, args.output_format)
     _write_or_print(artifact, args.output)
@@ -232,7 +238,11 @@ def _build_report(
     only_new: bool,
     policy: RepositoryPolicy,
     config_path: Path | None,
+    current_inventory: DependencyInventory | None = None,
+    baseline_inventory: DependencyInventory | None = None,
 ) -> dict:
+    current_inventory = current_inventory or DependencyInventory()
+    baseline_inventory = baseline_inventory or DependencyInventory()
     current_findings = _flatten_findings(current)
     baseline_findings = _flatten_findings(baseline)
     baseline_by_fingerprint = {item["fingerprint"]: item for item in baseline_findings}
@@ -285,6 +295,7 @@ def _build_report(
         }
         for audit_type, result in current
     ]
+    dependency_changes = compare_dependencies(current_inventory, baseline_inventory)
     return {
         "schema_version": 1,
         "tool": {"name": "Perfora", "version": __version__, "mode": "deterministic"},
@@ -305,6 +316,8 @@ def _build_report(
             "exclude": exclude_paths,
         },
         "analyses": analyses,
+        "dependency_inventory": current_inventory.model_dump(mode="json"),
+        "dependency_changes": dependency_changes.model_dump(mode="json"),
         "summary": {
             "total": len(current_findings),
             "new": sum(item["baseline_status"] == "new" for item in current_findings),

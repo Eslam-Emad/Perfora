@@ -13,7 +13,8 @@ deterministic Dart analyzer, enriches confirmed findings with a model selected
 by the user, and can copy a complete finding prompt for handoff to another AI
 agent.
 
-The current `0.2.0` release supports deterministic CLI/CI audits plus OpenCode,
+The current `0.3.0` release supports standards-mapped mobile security depth,
+deterministic CLI/CI audits, and OpenCode,
 Ollama, and OpenAI workspace enrichment without silently
 switching providers or models.
 
@@ -28,8 +29,9 @@ switching providers or models.
   identifier and its discovered metadata.
 - Static lifecycle-resource checks for Riverpod, Provider, Bloc/Cubit, GetX,
   and general Flutter classes.
-- Static security checks for hardcoded credentials, cleartext endpoints, disabled
-  TLS validation, Android cleartext traffic, and global iOS transport exceptions.
+- Standards-mapped mobile security checks for credentials, storage, logging,
+  clipboard use, transport, backups, exported components, permissions, deep
+  links, WebViews, cryptography, randomness, release debugging, and screenshots.
 - Evidence, severity, confidence, source location, recommendation, and model
   explanation views.
 - Stable finding fingerprints, versioned analyzer/rule-pack provenance, and
@@ -49,7 +51,10 @@ switching providers or models.
 - Server-sent audit progress events and durable audit history in SQLite.
 - Secret-redacted agent handoff prompts containing audit provenance, repository
   state, all finding details, recommendations, context manifest, and current source.
-- JSON, HTML, and SARIF audit exports.
+- JSON, HTML, SARIF, and CycloneDX 1.7 SBOM exports.
+- Local inventory across pub, CocoaPods, Gradle, Swift packages, Flutter plugins,
+  and bundled Apple frameworks, with dependency changes, available license
+  evidence, and privacy-sensitive SDK categories.
 - A non-interactive `perfora audit` command with repository policy, include/exclude
   globs, timeouts, Git baselines, new-only gates, stable exit codes, and provider-free
   JSON, HTML, SARIF, and Markdown CI artifacts.
@@ -63,10 +68,12 @@ switching providers or models.
 - Node.js 22 or newer.
 - Python 3.12 or newer.
 - Flutter with Dart 3.5 or newer.
-- At least one configured model provider:
+- For browser model enrichment, at least one configured model provider:
   - OpenCode CLI,
   - a running Ollama server with a generation model, or
   - an OpenAI project API key.
+
+The deterministic CLI and CI flow does not require or contact a model provider.
 
 ### 1. Clone and install
 
@@ -119,7 +126,7 @@ curl http://127.0.0.1:8765/api/health
 Expected response:
 
 ```json
-{"name":"Perfora","status":"ready","version":"0.2.0"}
+{"name":"Perfora","status":"ready","version":"0.3.0"}
 ```
 
 Use `Ctrl+C` in both terminals to stop the app.

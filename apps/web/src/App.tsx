@@ -289,7 +289,7 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
         <Settings size={18} /> Settings
       </button>
       <div className="sidebar-footer">
-        <span>v0.1 tracer</span><span className="status-dot" /> localhost
+        <span>v0.3 security depth</span><span className="status-dot" /> localhost
       </div>
     </aside>
   );
@@ -918,6 +918,10 @@ function AuditWorkspace({
   const progress = audit.events.at(-1)?.progress ?? 0;
   const skippedCoverage = Object.entries(audit.scan_coverage?.skipped_by_reason ?? {}).map(([reason, count]) => `${reason.replaceAll("_", " ")}: ${count}`).join(", ");
   const scannedCoverage = Object.entries(audit.scan_coverage?.scanned_by_type ?? {}).map(([type, count]) => `${type.replaceAll("_", " ")}: ${count}`).join(", ");
+  const platformCoverage = Object.entries(audit.scan_coverage?.coverage_by_platform ?? {}).map(([platform, count]) => `${platform}: ${count}`).join(", ");
+  const controlCoverage = Object.entries(audit.scan_coverage?.rules_by_control_group ?? {}).map(([group, rules]) => `${group}: ${rules.length}`).join(", ");
+  const dependencyCoverage = Object.entries(audit.dependency_inventory?.coverage_by_ecosystem ?? {}).map(([ecosystem, count]) => `${ecosystem}: ${count}`).join(", ");
+  const privacyCoverage = Object.entries(audit.dependency_inventory?.privacy_sdk_counts ?? {}).map(([category, count]) => `${category.replaceAll("_", " ")}: ${count}`).join(", ");
   return (
     <section className="workspace-page">
       <div className="workspace-header">
@@ -933,10 +937,12 @@ function AuditWorkspace({
       </div>
       {audit.error && <Notice tone={audit.status === "partial" ? "warning" : "danger"} title={audit.status === "partial" ? "Partial audit" : "Audit failed"}>{audit.error}</Notice>}
       {audit.scan_coverage && <div className="context-manifest coverage-manifest"><SearchCode size={16} /><span><strong>Scan coverage:</strong> discovered {audit.scan_coverage.files_discovered}, scanned {audit.scan_coverage.files_scanned}, skipped {audit.scan_coverage.files_skipped}. Scanned types: {scannedCoverage || "none"}. Skip reasons: {skippedCoverage || "none"}. Rules executed: {audit.scan_coverage.rules_executed.length}. Analyzer {audit.analyzer_version ?? "unknown"}.</span></div>}
+      {auditType === "security" && <div className="security-depth-summary"><div><p className="eyebrow">Standards coverage</p><strong>{platformCoverage || "No platform files scanned"}</strong><span>{controlCoverage || "No mapped control groups executed"}</span></div><div><p className="eyebrow">Dependency inventory</p><strong>{audit.dependency_inventory?.components.length ?? 0} components · {audit.dependency_inventory?.manifests.length ?? 0} manifests</strong><span>{dependencyCoverage || "No supported dependency manifests"}{privacyCoverage ? ` · Privacy-sensitive SDKs: ${privacyCoverage}` : ""}</span></div><div><p className="eyebrow">Vulnerability matching</p><strong>Not requested</strong><span>Local inventory only; no dependency data was sent to an online service.</span></div></div>}
       {["completed", "partial"].includes(audit.status) && (
         <div className="comparison-band">
           <div className="comparison-heading"><div><p className="eyebrow">Baseline comparison</p><strong>{comparison?.baseline_audit_id ? `Against ${comparison.baseline_audit_id.slice(0, 8)}` : "First observed audit"}</strong></div><label>Baseline<select aria-label="Comparison baseline" value={baselineId} onChange={(event) => setBaselineId(event.target.value)}><option value="">Automatic previous audit</option>{eligibleBaselines.map((candidate) => <option key={candidate.id} value={candidate.id}>{new Date(candidate.created_at).toLocaleString()} · {candidate.id.slice(0, 8)}</option>)}</select></label></div>
           <div className="comparison-metrics"><span><strong>{comparison?.new_finding_ids?.length ?? 0}</strong> New</span><span><strong>{comparison?.unchanged_finding_ids?.length ?? 0}</strong> Unchanged</span><span><strong>{comparison?.resolved_findings?.length ?? 0}</strong> Resolved</span><span className="danger"><strong>{comparison?.regressed_finding_ids?.length ?? 0}</strong> Regressed</span><span><strong>{comparison?.severity_changes?.length ?? 0}</strong> Severity changed</span></div>
+          {comparison?.dependency_changes && <div className="dependency-change-band"><strong>Dependency changes</strong><span>+{comparison.dependency_changes.added.length} added</span><span>~{comparison.dependency_changes.updated.length} updated</span><span>−{comparison.dependency_changes.removed.length} removed</span></div>}
           {comparisonError && <p className="comparison-error">{comparisonError}</p>}
         </div>
       )}
@@ -1064,6 +1070,7 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
       <div className="detail-section"><p className="eyebrow">Deterministic explanation</p><p className="lead-copy">{finding.explanation}</p></div>
       <div className="detail-section"><p className="eyebrow">Deterministic evidence</p><div className="evidence-list">{finding.evidence.map((evidenceLine) => <div key={evidenceLine}><CircleCheck size={16} /><span>{evidenceLine}</span></div>)}</div></div>
       <div className="detail-section recommendation"><div className="recommendation-icon"><ShieldCheck size={19} /></div><div><p className="eyebrow">Deterministic recommendation</p><p>{finding.recommendation}</p></div></div>
+      {finding.control_group && <div className="detail-section standards-section"><p className="eyebrow">Standards mapping · {finding.control_group}</p><div className="standard-links">{finding.standards?.map((standard) => <a key={standard.id} href={standard.url} target="_blank" rel="noreferrer"><strong>{standard.id}</strong><span>{standard.title}</span></a>)}</div><div className="standards-guidance"><div><strong>Detection limitations</strong><ul>{finding.detection_limitations?.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>Manual verification</strong><ul>{finding.manual_verification?.map((item) => <li key={item}>{item}</li>)}</ul></div></div>{finding.false_positive_guidance && <p><strong>False-positive guidance:</strong> {finding.false_positive_guidance}</p>}</div>}
       {finding.model_enrichment && <div className="detail-section recommendation"><div className="recommendation-icon"><Sparkles size={19} /></div><div><p className="eyebrow">Model perspective · {finding.model_enrichment.provider ?? audit.provider}/{finding.model_enrichment.model_id ?? audit.model_id}</p><p>{finding.model_enrichment.explanation}{finding.model_enrichment.recommendation ? ` ${finding.model_enrichment.recommendation}` : ""}</p></div></div>}
       <div className="context-manifest"><Code2 size={16} /><span><strong>Finding identity:</strong> {finding.rule_id}@{finding.rule_version || "legacy"} · {finding.fingerprint || "legacy record without fingerprint"}</span></div>
       <div className="context-manifest"><LockKeyhole size={16} /><span><strong>Context manifest:</strong> only {audit.context_manifest.length ? audit.context_manifest.join(", ") : "deterministic evidence"} was selected for model enrichment.</span></div>
@@ -1120,7 +1127,7 @@ function EmptyState({ icon: Icon, title, description, action }: { icon: typeof A
 }
 
 function ExportMenu({ audit }: { audit: AuditRecord }) {
-  return <div className="export-group"><Download size={16} />{(["html", "json", "sarif"] as const).map((format) => <a key={format} href={`/api/audits/${audit.id}/export?format=${format}`} download>{format.toUpperCase()}</a>)}</div>;
+  return <div className="export-group"><Download size={16} />{(["html", "json", "sarif", "cyclonedx"] as const).map((format) => <a key={format} href={`/api/audits/${audit.id}/export?format=${format}`} download>{format === "cyclonedx" ? "SBOM" : format.toUpperCase()}</a>)}</div>;
 }
 
 async function writeClipboard(value: string) {

@@ -195,6 +195,16 @@ describe("Perfora shell", () => {
         evidence: ["A cleartext endpoint was found."],
         explanation: "Traffic may be intercepted.",
         recommendation: "Use HTTPS.",
+        control_group: "MASVS-NETWORK",
+        platforms: ["Dart", "Android", "iOS"],
+        standards: [{
+          id: "MASVS-NETWORK-1",
+          title: "Secure network traffic",
+          url: "https://mas.owasp.org/MASVS/controls/MASVS-NETWORK-1/",
+        }],
+        detection_limitations: ["Only literal endpoints are detected."],
+        manual_verification: ["Inspect release traffic on a test proxy."],
+        false_positive_guidance: "Prove the endpoint cannot enter a release build.",
         model_enrichment: {
           provider: "ollama",
           model_id: "qwen2.5-coder:7b",
@@ -224,6 +234,27 @@ describe("Perfora shell", () => {
         scanned_by_type: { dart: 3 },
         skipped_by_reason: { generated_source: 1 },
         rules_executed: ["security.insecure_transport"],
+        coverage_by_platform: { dart: 3, android: 0, ios: 0 },
+        rules_by_control_group: { "MASVS-NETWORK": ["security.insecure_transport"] },
+      },
+      dependency_inventory: {
+        components: [{
+          bom_ref: "urn:perfora:firebase",
+          name: "firebase_analytics",
+          version: "12.0.0",
+          ecosystem: "pub",
+          source_file: "pubspec.lock",
+          scope: "required",
+          direct: true,
+          purl: "pkg:pub/firebase_analytics@12.0.0",
+          privacy_category: "analytics",
+          privacy_sensitive: true,
+        }],
+        manifests: ["pubspec.lock"],
+        coverage_by_ecosystem: { pub: 1 },
+        license_counts: { unknown: 1 },
+        privacy_sdk_counts: { analytics: 1 },
+        vulnerability_matching: "not_requested",
       },
     };
     const handoffPrompt = "# Resolve this Perfora finding\nAll finding details";
@@ -249,6 +280,7 @@ describe("Perfora shell", () => {
           regressed_finding_ids: [],
           severity_changes: [],
           resolved_findings: [],
+          dependency_changes: { added: [], removed: [], updated: [] },
         });
       }
       if (requestPath.endsWith(`/findings/${audit.findings[0].id}`) && init?.method === "PATCH") {
@@ -284,6 +316,14 @@ describe("Perfora shell", () => {
     expect(screen.getByText("Traffic may be intercepted.")).toBeInTheDocument();
     expect(screen.getByText(/The model agrees with the observed transport risk/)).toBeInTheDocument();
     expect(screen.getByText(/discovered 4, scanned 3, skipped 1/)).toBeInTheDocument();
+    expect(screen.getByText("Standards mapping · MASVS-NETWORK")).toBeInTheDocument();
+    expect(screen.getByText("Only literal endpoints are detected.")).toBeInTheDocument();
+    expect(screen.getByText("Inspect release traffic on a test proxy.")).toBeInTheDocument();
+    expect(screen.getByText(/1 components · 1 manifests/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "SBOM" })).toHaveAttribute(
+      "href",
+      "/api/audits/security-audit/export?format=cyclonedx",
+    );
     expect(screen.getByText("Baseline comparison")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Triage status"), { target: { value: "risk_accepted" } });

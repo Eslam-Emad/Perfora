@@ -371,6 +371,20 @@ code, pre { font-family: "JetBrains Mono", monospace; }
 .evidence-list > div { display: flex; gap: 8px; padding: 10px 12px; border-radius: 8px; background: #f4f8f6; color: #42534e; font: 10px/1.5 "JetBrains Mono"; }
 .evidence-list svg { flex: none; color: var(--green); }
 .detail-section.recommendation { display: flex; gap: 12px; border: 0; }
+.security-depth-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0 15px; }
+.security-depth-summary > div { display: grid; gap: 4px; padding: 13px; border: 1px solid #dae6e1; border-radius: 10px; background: #fbfdfc; }
+.security-depth-summary strong { font-size: 10px; }
+.dependency-change-band { display: flex; align-items: center; gap: 13px; padding: 9px 12px; border-top: 1px solid #e3ebe8; color: var(--muted); font-size: 9px; }
+.dependency-change-band strong { margin-right: auto; color: var(--ink); }
+.security-depth-summary span { color: var(--muted); font-size: 8px; line-height: 1.45; }
+.standards-section { display: grid; gap: 13px; }
+.standard-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.standard-links a { display: grid; gap: 2px; min-width: 180px; padding: 9px 11px; border: 1px solid #d7e5df; border-radius: 8px; color: var(--green-dark); background: #f6faf8; text-decoration: none; }
+.standard-links a span { color: var(--muted); font-size: 8px; }
+.standards-guidance { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.standards-guidance > div { padding: 11px; border-radius: 8px; background: #f7f9f8; }
+.standards-guidance strong, .standards-section > p:last-child { font-size: 9px; }
+.standards-guidance ul { padding-left: 17px; margin: 7px 0 0; color: #52635d; font-size: 9px; line-height: 1.55; }
 .recommendation-icon { display: grid; place-items: center; width: 37px; height: 37px; flex: none; border-radius: 10px; color: var(--green); background: var(--green-pale); }
 .recommendation p:last-child { margin: 0; color: #354640; font-size: 12px; line-height: 1.6; }
 .context-manifest { display: flex; gap: 8px; padding: 11px; border: 1px solid #dae6e1; border-radius: 9px; color: #60706b; background: #f7faf8; font-size: 9px; }
@@ -441,6 +455,7 @@ code, pre { font-family: "JetBrains Mono", monospace; }
   .page-heading > .button, .workspace-actions { margin-left: 0; }
   .tool-grid, .provider-grid, .repo-stats, .evidence-summary { grid-template-columns: 1fr 1fr; }
   .comparison-metrics { grid-template-columns: 1fr 1fr; }
+  .security-depth-summary, .standards-guidance { grid-template-columns: 1fr; }
   .comparison-metrics span { border-bottom: 1px solid #edf1ef; }
   .comparison-heading { align-items: stretch; flex-direction: column; }
   .comparison-heading label { min-width: 0; }

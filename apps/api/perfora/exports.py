@@ -2,12 +2,30 @@ from __future__ import annotations
 
 import html
 import json
+from datetime import UTC, datetime
 
+from . import __version__
+from .ci_report import export_cyclonedx
 from .domain import AuditRecord
 
 
 def export_json(audit: AuditRecord) -> str:
     return audit.model_dump_json(indent=2)
+
+
+def export_audit_cyclonedx(audit: AuditRecord) -> str:
+    return export_cyclonedx(
+        {
+            "tool": {"version": __version__},
+            "generated_at": datetime.now(UTC).isoformat(),
+            "repository": {
+                "name": audit.repository.name,
+                "path": audit.repository.path,
+                "commit": audit.repository.commit_sha,
+            },
+            "dependency_inventory": audit.dependency_inventory.model_dump(mode="json"),
+        }
+    )
 
 
 def export_sarif(audit: AuditRecord) -> str:
@@ -23,7 +41,11 @@ def export_sarif(audit: AuditRecord) -> str:
             "name": finding.title,
             "shortDescription": {"text": finding.explanation},
             "help": {"text": finding.recommendation},
-            "properties": {"version": finding.rule_version},
+            "properties": {
+                "version": finding.rule_version,
+                "controlGroup": finding.control_group,
+                "standards": [item.id for item in finding.standards],
+            },
         }
         result = {
             "ruleId": finding.rule_id,
@@ -63,6 +85,12 @@ def export_sarif(audit: AuditRecord) -> str:
                     if latest_verification
                     else None
                 ),
+                "controlGroup": finding.control_group,
+                "platforms": finding.platforms,
+                "standards": [item.model_dump(mode="json") for item in finding.standards],
+                "detectionLimitations": finding.detection_limitations,
+                "manualVerification": finding.manual_verification,
+                "falsePositiveGuidance": finding.false_positive_guidance,
             },
         }
         if finding.fingerprint:
@@ -105,6 +133,18 @@ def export_html(audit: AuditRecord) -> str:
             else "not run"
           }</p>
           <p>{html.escape(finding.explanation)}</p>
+          {
+            f'''<h3>Standards mapping</h3>
+          <p>{html.escape(finding.control_group or "Unmapped")} · {
+            html.escape(", ".join(item.id for item in finding.standards) or "No references")
+          }</p>
+          <h3>Detection limitations</h3>
+          <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in finding.detection_limitations)}</ul>
+          <h3>Manual verification</h3>
+          <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in finding.manual_verification)}</ul>'''
+            if finding.control_group
+            else ""
+          }
           <h3>Evidence</h3>
           <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in finding.evidence)}</ul>
           <h3>Deterministic recommendation</h3>

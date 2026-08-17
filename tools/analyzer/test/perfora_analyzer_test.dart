@@ -35,6 +35,7 @@ void main() {
 
     expect(findings, hasLength(5));
     expect(report.rulePackVersion, securityRulePackVersion);
+    expect(findings.every((finding) => finding.ruleVersion == '2.0.0'), isTrue);
     expect(
       findings.map((finding) => finding.ruleId).toSet(),
       {
@@ -58,6 +59,48 @@ void main() {
     final findings = (await SecurityAnalyzer().analyze(root)).findings;
 
     expect(findings, isEmpty);
+  });
+
+  test('maps mobile security depth findings to standards and limitations',
+      () async {
+    final root =
+        Directory('${Directory.current.path}/test/fixtures/security_depth_app');
+
+    final report = await SecurityAnalyzer().analyze(root);
+    final findings = report.findings;
+    final ruleIds = findings.map((finding) => finding.ruleId).toSet();
+
+    expect(
+      ruleIds,
+      containsAll({
+        'security.sensitive_logging',
+        'security.insecure_local_storage',
+        'security.insecure_token_persistence',
+        'security.clipboard_exposure',
+        'security.android.backup_enabled',
+        'security.android.exported_component',
+        'security.android.overbroad_permission',
+        'security.ios.privacy_permission',
+        'security.android.insecure_deep_link',
+        'security.ios.custom_url_scheme',
+        'security.webview_unsafe_setting',
+        'security.weak_cryptography',
+        'security.predictable_randomness',
+        'security.release_debuggable',
+        'security.screenshot_exposure',
+      }),
+    );
+    for (final finding in findings) {
+      final json = finding.toJson();
+      expect(json['control_group'], isNotEmpty);
+      expect(json['standards'], isNotEmpty);
+      expect(json['detection_limitations'], isNotEmpty);
+      expect(json['manual_verification'], isNotEmpty);
+      expect(json['false_positive_guidance'], isNotEmpty);
+    }
+    expect(report.coverage.scannedByType['dart'], 1);
+    expect(report.coverage.scannedByType['android_manifest'], 1);
+    expect(report.coverage.scannedByType['ios_entitlements'], 1);
   });
 
   test('skips binary source and dependency metadata without failing', () async {

@@ -28,9 +28,18 @@ provider and enforce repository-owned policy against a Git baseline.
   coverage.
 - Riverpod, Provider, Bloc/Cubit, and GetX must satisfy a shared lifecycle-rule
   contract before being advertised as supported.
-- Security audits deterministically cover hardcoded credentials, cleartext URLs,
-  unconditional certificate acceptance, Android cleartext policy, and iOS App
-  Transport Security exceptions. Secret values never enter finding evidence.
+- Security audits use versioned deterministic rules mapped to OWASP MASVS and
+  relevant MASWE/MASTG references. Every rule records platform scope, detection
+  limitations, manual verification, and false-positive guidance. Secret values
+  never enter finding evidence.
+- Security coverage is reported by control group and independently for Dart,
+  Android, iOS, and dependency manifests. Perfora does not calculate an overall
+  security score.
+- Dependency inventory is local by default and covers pub, CocoaPods, Gradle,
+  Swift packages, Flutter plugins, and bundled Apple frameworks. CycloneDX,
+  dependency changes, available license evidence, and privacy-SDK categories
+  are exportable. No online vulnerability lookup occurs without a future,
+  explicit consent boundary.
 - No unsupported overall performance score. The UI reports evidence, severity,
   confidence, coverage, and verification state.
 - Copy Prompt is per-finding and includes audit provenance, repository state,
@@ -58,7 +67,7 @@ provider and enforce repository-owned policy against a Git baseline.
 - Persisted audit records are versioned and database changes use ordered schema
   migrations with legacy-record defaults.
 - One active local audit job at a time.
-- Exports: HTML, JSON, and SARIF.
+- Exports: HTML, JSON, SARIF, and CycloneDX 1.7.
 - Optional shared repository policy lives in `.perfora.yaml`.
 - The `perfora audit` CLI is analyzer-only. It supports repeated rule-pack
   selection, include/exclude globs, bounded timeouts, JSON/HTML/SARIF artifacts,
