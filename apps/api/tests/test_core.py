@@ -1,4 +1,6 @@
 import json
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -6,32 +8,39 @@ from fastapi.testclient import TestClient
 
 from perfora import analyzer_client, repositories
 from perfora.analyzer_client import DartAnalyzerClient
+from perfora.audits import AuditCoordinator
+from perfora.comparisons import AuditComparisonService
 from perfora.config import Settings
-from perfora.database import AuditStore
+from perfora.database import DATABASE_SCHEMA_VERSION, AuditStore
 from perfora.domain import (
+    AnalyzerResult,
     AuditRecord,
     AuditType,
+    ComparisonStatus,
     Finding,
-    FixApplyRequest,
+    FindingUpdate,
+    ModelEnrichment,
     ProviderId,
     RepositorySnapshot,
+    RulePackMetadata,
+    ScanCoverage,
+    TriageStatus,
+    VerificationOutcome,
 )
 from perfora.exports import export_html, export_sarif
-from perfora.fixes import FIX_SCHEMA, FixSafetyError, FixService
+from perfora.findings import FindingService, FindingUpdateError
 from perfora.main import app
-from perfora.process import run_process
 from perfora.prompts import PromptService
-from perfora.providers import ProviderRegistry
 from perfora.providers.base import ProviderStructuredOutputError
 from perfora.providers.opencode import (
     OpenCodeAdapter,
     _decode_json_object,
-    _extract_unified_diff,
     _generation_environment,
     _text_from_json_events,
 )
 from perfora.repositories import inspect_repository, pick_repository_path
 from perfora.security import redact_secrets
+from perfora.verifications import VerificationError, VerificationService
 
 
 def test_health_endpoint() -> None:
@@ -40,6 +49,15 @@ def test_health_endpoint() -> None:
 
     assert response.status_code == 200
     assert response.json()["name"] == "Perfora"
+
+
+def test_legacy_mutating_fix_routes_are_not_exposed() -> None:
+    paths = app.openapi()["paths"]
+
+    assert not any(path.endswith(("/fix", "/apply", "/rollback")) for path in paths)
+    assert "patch" in paths["/api/audits/{audit_id}/findings/{finding_id}"]
+    assert "/api/audits/{audit_id}/comparison" in paths
+    assert "post" in paths["/api/audits/{audit_id}/findings/{finding_id}/verify"]
 
 
 @pytest.mark.asyncio
@@ -196,30 +214,6 @@ async def test_opencode_sends_generation_prompt_over_stdin(monkeypatch) -> None:
     assert observed["command"][-3:] == ["--agent", "perfora-json", "--pure"]
 
 
-def test_fix_schema_uses_patch_lines_instead_of_a_multiline_json_string() -> None:
-    assert "patch_lines" in FIX_SCHEMA["properties"]
-    assert "patch" not in FIX_SCHEMA["properties"]
-
-
-def test_extracts_a_direct_fenced_unified_diff() -> None:
-    response = """Here is the requested patch:
-```diff
-diff --git a/ios/Runner/Info.plist b/ios/Runner/Info.plist
---- a/ios/Runner/Info.plist
-+++ b/ios/Runner/Info.plist
-@@ -1,2 +1 @@
--<true/>
-+<false/>
-```
-"""
-
-    patch = _extract_unified_diff(response)
-
-    assert patch is not None
-    assert patch.startswith("diff --git")
-    assert patch.endswith("+<false/>")
-
-
 @pytest.mark.asyncio
 async def test_dart_analyzer_selects_the_security_rule_pack(tmp_path: Path, monkeypatch) -> None:
     analyzer_root = tmp_path / "analyzer"
@@ -232,13 +226,36 @@ async def test_dart_analyzer_selects_the_security_rule_pack(tmp_path: Path, monk
 
     async def analyze(command, **_):
         captured_command.extend(command)
-        return "[]"
+        return json.dumps(
+            {
+                "analyzer_version": "0.3.0",
+                "rule_pack": {"id": "security", "version": "1.0.0"},
+                "coverage": {
+                    "files_discovered": 3,
+                    "files_scanned": 2,
+                    "files_skipped": 1,
+                    "scanned_by_type": {"dart": 2},
+                    "skipped_by_reason": {"generated_source": 1},
+                    "rules_executed": ["security.hardcoded_secret"],
+                    "scanned_files": ["lib/a.dart", "lib/b.dart"],
+                    "skipped_files_by_reason": {
+                        "generated_source": ["lib/generated.g.dart"]
+                    },
+                },
+                "findings": [],
+            }
+        )
 
     monkeypatch.setattr(analyzer_client.shutil, "which", lambda _: "/usr/bin/dart")
     monkeypatch.setattr(analyzer_client, "run_process", analyze)
     client = DartAnalyzerClient(Settings(analyzer_root=analyzer_root))
 
-    assert await client.analyze(repository, AuditType.SECURITY) == []
+    result = await client.analyze(repository, AuditType.SECURITY)
+
+    assert result.findings == []
+    assert result.analyzer_version == "0.3.0"
+    assert result.rule_pack == RulePackMetadata(id="security", version="1.0.0")
+    assert result.coverage.files_scanned == 2
     assert captured_command[-2:] == ["--audit-type", "security"]
 
 
@@ -248,6 +265,36 @@ def test_existing_audit_records_default_to_performance(tmp_path: Path) -> None:
     payload = audit.model_dump(exclude={"audit_type"})
 
     assert AuditRecord.model_validate(payload).audit_type == AuditType.PERFORMANCE
+
+
+def test_database_migrates_and_loads_a_legacy_audit(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy.db"
+    legacy = _audit(tmp_path).model_dump(
+        exclude={"record_version", "analyzer_version", "rule_pack", "scan_coverage"}
+    )
+    legacy["findings"][0].pop("fingerprint", None)
+    legacy["findings"][0].pop("rule_version", None)
+    legacy["findings"][0].pop("model_enrichment", None)
+    legacy["findings"][0]["model_explanation"] = "Legacy model explanation"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE audits (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO audits(id, payload, updated_at) VALUES (?, ?, ?)",
+            (legacy["id"], json.dumps(legacy, default=str), legacy["updated_at"].isoformat()),
+        )
+
+    store = AuditStore(database_path)
+    loaded = store.get(legacy["id"])
+
+    assert store.schema_version == DATABASE_SCHEMA_VERSION
+    assert loaded is not None
+    assert loaded.record_version == 4
+    assert loaded.analyzer_version == "unknown"
+    assert loaded.findings[0].rule_version == "legacy"
+    assert loaded.findings[0].model_enrichment is not None
+    assert loaded.findings[0].model_enrichment.explanation == "Legacy model explanation"
 
 
 def test_exports_evidence_as_html_and_sarif(tmp_path: Path) -> None:
@@ -260,21 +307,10 @@ def test_exports_evidence_as_html_and_sarif(tmp_path: Path) -> None:
     assert "controller.dart:8" in html
     assert '"ruleId": "lifecycle.missing_cleanup"' in sarif
     assert '"auditType": "performance"' in sarif
-
-
-def test_rejects_patch_outside_approved_file(tmp_path: Path) -> None:
-    settings = Settings(database_path=tmp_path.parent / f"{tmp_path.name}.db")
-    service = FixService(AuditStore(settings.database_path), ProviderRegistry(settings))
-    patch = """diff --git a/lib/other.dart b/lib/other.dart
---- a/lib/other.dart
-+++ b/lib/other.dart
-@@ -1 +1 @@
--old
-+new
-"""
-
-    with pytest.raises(FixSafetyError, match="outside the approved finding"):
-        service._validate_patch(tmp_path, patch, allowed_file="lib/controller.dart")
+    assert '"perforaFindingFingerprint": "sha256:fixture"' in sarif
+    assert '"triageStatus": "new"' in sarif
+    assert '"verificationOutcome": null' in sarif
+    assert "<strong>Triage:</strong> new" in html
 
 
 def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
@@ -291,7 +327,12 @@ def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
     audit.repository.fingerprint = "fingerprint-1"
     audit.repository.packages = [".", "packages/shared"]
     audit.context_manifest = ["lib/controller.dart", "pubspec.yaml"]
-    audit.findings[0].model_explanation = "The model confirmed the ownership gap."
+    audit.findings[0].model_enrichment = ModelEnrichment(
+        provider=ProviderId.OLLAMA,
+        model_id="qwen",
+        explanation="The model confirmed the ownership gap.",
+        recommendation="Use the existing owner cleanup hook.",
+    )
     store.save(audit)
 
     result = PromptService(store).build(audit.id, audit.findings[0].id)
@@ -304,9 +345,16 @@ def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
     assert "Commit: abc123" in result.prompt
     assert "Clean at audit time: false" in result.prompt
     assert "Rule ID: lifecycle.missing_cleanup" in result.prompt
+    assert "Stable fingerprint: sha256:fixture" in result.prompt
+    assert "Rule version: 1.0.0" in result.prompt
+    assert "Triage status: new" in result.prompt
+    assert "Baseline audit ID: none" in result.prompt
+    assert "No triage notes recorded" in result.prompt
+    assert "No deterministic verification attempts recorded" in result.prompt
     assert "Controller is created by the class." in result.prompt
     assert "The controller outlives its owner." in result.prompt
     assert "The model confirmed the ownership gap." in result.prompt
+    assert "Use the existing owner cleanup hook." in result.prompt
     assert "Dispose the controller." in result.prompt
     assert "packages/shared" in result.prompt
     assert "class Controller {}" in result.prompt
@@ -315,59 +363,400 @@ def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
     assert "Do not commit, push" in result.prompt
 
 
-@pytest.mark.asyncio
-async def test_applies_and_rolls_back_reviewed_patch(tmp_path: Path) -> None:
-    source = tmp_path / "lib" / "controller.dart"
-    source.parent.mkdir()
-    source.write_text("final value = 1;\n")
-    await run_process(["git", "init", "-q"], cwd=tmp_path)
-    await run_process(["git", "add", "."], cwd=tmp_path)
-    await run_process(
-        [
-            "git",
-            "-c",
-            "user.name=Perfora Test",
-            "-c",
-            "user.email=perfora@test.local",
-            "commit",
-            "-q",
-            "-m",
-            "fixture",
-        ],
-        cwd=tmp_path,
+def test_finding_fingerprint_is_stable_when_only_the_line_moves() -> None:
+    original = {
+        "rule_id": "lifecycle.missing_cleanup",
+        "file": "lib/controller.dart",
+        "line": 8,
+        "symbol": "Owner.controller",
+        "framework": "Provider",
+    }
+    moved = {**original, "line": 42}
+
+    original_basis = AuditCoordinator._fingerprint_basis(original)
+    moved_basis = AuditCoordinator._fingerprint_basis(moved)
+
+    assert original_basis == moved_basis
+    assert AuditCoordinator._fingerprint(original_basis) == AuditCoordinator._fingerprint(
+        moved_basis
     )
-    head = await run_process(["git", "rev-parse", "HEAD"], cwd=tmp_path)
-    settings = Settings(database_path=tmp_path.parent / f"{tmp_path.name}.db")
-    store = AuditStore(settings.database_path)
+
+
+def test_updates_finding_triage_with_reason_note_and_history(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "triage.db")
     audit = _audit(tmp_path)
     store.save(audit)
-    service = FixService(store, ProviderRegistry(settings))
-    patch = """diff --git a/lib/controller.dart b/lib/controller.dart
---- a/lib/controller.dart
-+++ b/lib/controller.dart
-@@ -1 +1 @@
--final value = 1;
-+final value = 2;
-"""
+    service = FindingService(store)
 
-    result = await service.apply(
+    with pytest.raises(FindingUpdateError, match="disposition reason"):
+        service.update(
+            audit.id,
+            audit.findings[0].id,
+            FindingUpdate(triage_status=TriageStatus.RISK_ACCEPTED),
+        )
+    with pytest.raises(FindingUpdateError, match="deterministic re-scan"):
+        service.update(
+            audit.id,
+            audit.findings[0].id,
+            FindingUpdate(triage_status=TriageStatus.VERIFIED_RESOLVED),
+        )
+
+    updated = service.update(
         audit.id,
         audit.findings[0].id,
-        FixApplyRequest(
-            approved=True,
-            expected_head=head,
-            patch=patch,
-            verification_commands=[],
+        FindingUpdate(
+            triage_status=TriageStatus.RISK_ACCEPTED,
+            owner="Security team",
+            disposition_reason="Compensating network control is documented.",
+            suppression_expires_at=datetime.now(UTC) + timedelta(days=30),
+            note="Review again before release.",
         ),
     )
-    assert result.applied is True
-    assert result.branch.startswith("perfora/fix-")
-    assert source.read_text() == "final value = 2;\n"
 
-    rollback = await service.rollback(audit.id, audit.findings[0].id)
+    assert updated.triage_status == TriageStatus.RISK_ACCEPTED
+    assert updated.owner == "Security team"
+    assert updated.notes[0].body == "Review again before release."
+    assert updated.status_history[0].from_status == TriageStatus.NEW
+    assert updated.status_history[0].to_status == TriageStatus.RISK_ACCEPTED
 
-    assert rollback["rolled_back"] is True
-    assert source.read_text() == "final value = 1;\n"
+
+def test_compares_new_unchanged_resolved_regressed_and_severity_changes(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "comparison.db")
+    older = _audit(tmp_path)
+    older.id = "older"
+    older.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    older.updated_at = older.created_at
+    older.findings[0].id = "older-regressed"
+    older.findings[0].audit_id = older.id
+    older.findings[0].fingerprint = "sha256:regressed"
+    store.save(older)
+
+    baseline = _audit(tmp_path)
+    baseline.id = "baseline"
+    baseline.created_at = datetime(2026, 1, 2, tzinfo=UTC)
+    baseline.updated_at = baseline.created_at
+    baseline.findings[0].id = "baseline-same"
+    baseline.findings[0].audit_id = baseline.id
+    baseline.findings.extend(
+        [
+            baseline.findings[0].model_copy(
+                deep=True,
+                update={
+                    "id": "baseline-severity",
+                    "audit_id": baseline.id,
+                    "fingerprint": "sha256:severity",
+                    "severity": "medium",
+                },
+            ),
+            baseline.findings[0].model_copy(
+                deep=True,
+                update={
+                    "id": "baseline-resolved",
+                    "audit_id": baseline.id,
+                    "fingerprint": "sha256:resolved",
+                },
+            ),
+        ]
+    )
+    store.save(baseline)
+
+    current = _audit(tmp_path)
+    current.id = "current"
+    current.created_at = datetime(2026, 1, 3, tzinfo=UTC)
+    current.updated_at = current.created_at
+    current.findings[0].id = "current-same"
+    current.findings[0].audit_id = current.id
+    current.findings.extend(
+        [
+            current.findings[0].model_copy(
+                deep=True,
+                update={
+                    "id": "current-severity",
+                    "audit_id": current.id,
+                    "fingerprint": "sha256:severity",
+                    "severity": "critical",
+                },
+            ),
+            current.findings[0].model_copy(
+                deep=True,
+                update={
+                    "id": "current-new",
+                    "audit_id": current.id,
+                    "fingerprint": "sha256:new",
+                },
+            ),
+            current.findings[0].model_copy(
+                deep=True,
+                update={
+                    "id": "current-regressed",
+                    "audit_id": current.id,
+                    "fingerprint": "sha256:regressed",
+                },
+            ),
+        ]
+    )
+    store.save(current)
+
+    comparison = AuditComparisonService(store).compare(current.id, baseline.id)
+
+    assert comparison.unchanged_finding_ids == ["current-same"]
+    assert comparison.new_finding_ids == ["current-new"]
+    assert comparison.regressed_finding_ids == ["current-regressed"]
+    assert comparison.severity_changes[0].finding_id == "current-severity"
+    assert comparison.resolved_findings[0].id == "baseline-resolved"
+
+
+def test_applies_baseline_triage_and_reopens_resolved_findings(tmp_path: Path) -> None:
+    store = AuditStore(tmp_path / "carry-forward.db")
+    baseline = _audit(tmp_path)
+    baseline.id = "baseline"
+    baseline.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    baseline.updated_at = baseline.created_at
+    baseline.findings[0].audit_id = baseline.id
+    baseline.findings[0].triage_status = TriageStatus.RESOLVED
+    baseline.findings[0].owner = "Mobile platform"
+    store.save(baseline)
+    current = _audit(tmp_path)
+    current.id = "current"
+    current.created_at = datetime(2026, 1, 2, tzinfo=UTC)
+    current.updated_at = current.created_at
+    current.findings[0].audit_id = current.id
+
+    comparison = AuditComparisonService(store).apply_baseline(current)
+
+    assert comparison.baseline_audit_id == baseline.id
+    assert current.baseline_audit_id == baseline.id
+    assert current.findings[0].owner == "Mobile platform"
+    assert current.findings[0].triage_status == TriageStatus.REOPENED
+    assert current.findings[0].comparison_status == ComparisonStatus.REGRESSED
+
+
+@pytest.mark.asyncio
+async def test_verification_marks_a_resolved_finding_verified_when_absent(
+    tmp_path: Path,
+) -> None:
+    raw = _raw_finding()
+    audit = _audit(tmp_path)
+    audit.findings[0].fingerprint = AuditCoordinator._fingerprint(
+        AuditCoordinator._fingerprint_basis(raw)
+    )
+    audit.findings[0].triage_status = TriageStatus.RESOLVED
+    source = tmp_path / audit.findings[0].file
+    source.parent.mkdir(parents=True)
+    source.write_text("class Controller {}\n")
+    store = AuditStore(tmp_path / "verification-resolved.db")
+    store.save(audit)
+
+    result = await VerificationService(
+        store,
+        _AnalyzerStub(_verification_result(audit.findings[0].file, [])),
+        _repository_inspector(audit.repository),
+    ).verify(audit.id, audit.findings[0].id)
+
+    saved = store.get(audit.id)
+    assert result.outcome == VerificationOutcome.VERIFIED_RESOLVED
+    assert result.rule_executed is True
+    assert result.file_scanned is True
+    assert saved is not None
+    assert saved.findings[0].triage_status == TriageStatus.VERIFIED_RESOLVED
+    assert saved.findings[0].verification_attempts[0].id == result.id
+
+
+@pytest.mark.asyncio
+async def test_verification_reopens_a_resolved_finding_that_is_still_present(
+    tmp_path: Path,
+) -> None:
+    raw = _raw_finding()
+    audit = _audit(tmp_path)
+    audit.findings[0].fingerprint = AuditCoordinator._fingerprint(
+        AuditCoordinator._fingerprint_basis(raw)
+    )
+    audit.findings[0].triage_status = TriageStatus.RESOLVED
+    source = tmp_path / audit.findings[0].file
+    source.parent.mkdir(parents=True)
+    source.write_text("class Controller {}\n")
+    store = AuditStore(tmp_path / "verification-present.db")
+    store.save(audit)
+
+    result = await VerificationService(
+        store,
+        _AnalyzerStub(_verification_result(audit.findings[0].file, [raw])),
+        _repository_inspector(audit.repository),
+    ).verify(audit.id, audit.findings[0].id)
+
+    saved = store.get(audit.id)
+    assert result.outcome == VerificationOutcome.STILL_PRESENT
+    assert result.observed_line == 8
+    assert saved is not None
+    assert saved.findings[0].triage_status == TriageStatus.REOPENED
+    assert saved.findings[0].status_history[-1].to_status == TriageStatus.REOPENED
+
+
+@pytest.mark.asyncio
+async def test_verification_is_inconclusive_when_the_source_is_skipped(
+    tmp_path: Path,
+) -> None:
+    raw = _raw_finding()
+    audit = _audit(tmp_path)
+    audit.findings[0].fingerprint = AuditCoordinator._fingerprint(
+        AuditCoordinator._fingerprint_basis(raw)
+    )
+    audit.findings[0].triage_status = TriageStatus.RESOLVED
+    source = tmp_path / audit.findings[0].file
+    source.parent.mkdir(parents=True)
+    source.write_text("class Controller {}\n")
+    store = AuditStore(tmp_path / "verification-skipped.db")
+    store.save(audit)
+    result = AnalyzerResult(
+        analyzer_version="0.3.0",
+        rule_pack=RulePackMetadata(id="performance", version="1.0.0"),
+        coverage=ScanCoverage(
+            files_discovered=1,
+            files_scanned=0,
+            files_skipped=1,
+            skipped_by_reason={"generated_source": 1},
+            rules_executed=["lifecycle.missing_cleanup"],
+            scanned_files=[],
+            skipped_files_by_reason={"generated_source": [audit.findings[0].file]},
+        ),
+    )
+
+    attempt = await VerificationService(
+        store,
+        _AnalyzerStub(result),
+        _repository_inspector(audit.repository),
+    ).verify(audit.id, audit.findings[0].id)
+
+    saved = store.get(audit.id)
+    assert attempt.outcome == VerificationOutcome.INCONCLUSIVE
+    assert "generated source" in attempt.message
+    assert saved is not None
+    assert saved.findings[0].triage_status == TriageStatus.RESOLVED
+
+
+@pytest.mark.asyncio
+async def test_verification_rejects_legacy_or_unresolved_findings(tmp_path: Path) -> None:
+    audit = _audit(tmp_path)
+    audit.findings[0].fingerprint = ""
+    store = AuditStore(tmp_path / "verification-guard.db")
+    store.save(audit)
+    service = VerificationService(
+        store,
+        _AnalyzerStub(AnalyzerResult()),
+        _repository_inspector(audit.repository),
+    )
+
+    with pytest.raises(VerificationError, match="stable fingerprint"):
+        await service.verify(audit.id, audit.findings[0].id)
+
+
+@pytest.mark.asyncio
+async def test_model_enrichment_does_not_replace_deterministic_content(tmp_path: Path) -> None:
+    class AnalyzerStub:
+        async def analyze(self, *_):
+            return AnalyzerResult(
+                analyzer_version="0.3.0",
+                rule_pack=RulePackMetadata(id="performance", version="1.0.0"),
+                coverage=ScanCoverage(
+                    files_discovered=1,
+                    files_scanned=1,
+                    scanned_by_type={"dart": 1},
+                    rules_executed=["lifecycle.missing_cleanup"],
+                    scanned_files=["lib/controller.dart"],
+                    skipped_files_by_reason={},
+                ),
+                findings=[
+                    {
+                        "rule_id": "lifecycle.missing_cleanup",
+                        "rule_version": "1.0.0",
+                        "title": "Controller is not released",
+                        "severity": "high",
+                        "confidence": 0.94,
+                        "file": "lib/controller.dart",
+                        "line": 8,
+                        "symbol": "Owner.controller",
+                        "framework": "Provider",
+                        "evidence": ["Controller is owned by the class."],
+                        "explanation": "Deterministic explanation",
+                        "recommendation": "Deterministic recommendation",
+                    }
+                ],
+            )
+
+    class ProviderStub:
+        async def generate_json(self, *_):
+            return {
+                "explanation": "Model explanation",
+                "recommendation": "Model recommendation",
+            }
+
+    database_path = tmp_path / "audit.db"
+    store = AuditStore(database_path)
+    audit = _audit(tmp_path)
+    audit.findings = []
+    audit.status = "queued"
+    store.save(audit)
+    coordinator = AuditCoordinator(store, AnalyzerStub(), ProviderStub())
+
+    await coordinator._run(audit.id)
+    completed = store.get(audit.id)
+
+    assert completed is not None
+    assert completed.findings[0].recommendation == "Deterministic recommendation"
+    assert completed.findings[0].model_enrichment is not None
+    assert completed.findings[0].model_enrichment.recommendation == "Model recommendation"
+    assert completed.analyzer_version == "0.3.0"
+    assert completed.scan_coverage.files_scanned == 1
+
+
+class _AnalyzerStub:
+    def __init__(self, result: AnalyzerResult):
+        self.result = result
+
+    async def analyze(self, *_):
+        return self.result
+
+
+def _repository_inspector(snapshot: RepositorySnapshot):
+    async def inspect(_: str) -> RepositorySnapshot:
+        return snapshot
+
+    return inspect
+
+
+def _raw_finding() -> dict:
+    return {
+        "rule_id": "lifecycle.missing_cleanup",
+        "rule_version": "1.0.0",
+        "title": "Controller is not released",
+        "severity": "high",
+        "confidence": 0.94,
+        "file": "lib/controller.dart",
+        "line": 8,
+        "symbol": None,
+        "framework": "Provider",
+        "evidence": ["Controller is created by the class."],
+        "explanation": "The controller outlives its owner.",
+        "recommendation": "Dispose the controller.",
+    }
+
+
+def _verification_result(file: str, findings: list[dict]) -> AnalyzerResult:
+    return AnalyzerResult(
+        analyzer_version="0.3.0",
+        rule_pack=RulePackMetadata(id="performance", version="1.0.0"),
+        coverage=ScanCoverage(
+            files_discovered=1,
+            files_scanned=1,
+            scanned_by_type={"dart": 1},
+            rules_executed=["lifecycle.missing_cleanup"],
+            scanned_files=[file],
+            skipped_files_by_reason={},
+        ),
+        findings=findings,
+    )
 
 
 def _audit(repository: Path) -> AuditRecord:
@@ -389,7 +778,9 @@ def _audit(repository: Path) -> AuditRecord:
         Finding(
             id="finding-1",
             audit_id=audit.id,
+            fingerprint="sha256:fixture",
             rule_id="lifecycle.missing_cleanup",
+            rule_version="1.0.0",
             title="Controller is not released",
             severity="high",
             confidence=0.94,

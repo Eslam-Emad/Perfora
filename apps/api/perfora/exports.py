@@ -15,33 +15,61 @@ def export_sarif(audit: AuditRecord) -> str:
     results = []
     level = {"low": "note", "medium": "warning", "high": "error", "critical": "error"}
     for finding in audit.findings:
+        latest_verification = (
+            finding.verification_attempts[-1] if finding.verification_attempts else None
+        )
         rules[finding.rule_id] = {
             "id": finding.rule_id,
             "name": finding.title,
             "shortDescription": {"text": finding.explanation},
             "help": {"text": finding.recommendation},
+            "properties": {"version": finding.rule_version},
         }
-        results.append(
-            {
-                "ruleId": finding.rule_id,
-                "level": level[finding.severity],
-                "message": {"text": finding.explanation},
-                "locations": [
-                    {
-                        "physicalLocation": {
-                            "artifactLocation": {"uri": finding.file},
-                            "region": {"startLine": finding.line},
-                        }
+        result = {
+            "ruleId": finding.rule_id,
+            "level": level[finding.severity],
+            "message": {"text": finding.explanation},
+            "locations": [
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": finding.file},
+                        "region": {"startLine": finding.line},
                     }
-                ],
-                "properties": {
-                    "confidence": finding.confidence,
-                    "framework": finding.framework,
-                    "status": finding.status,
-                    "auditType": audit.audit_type.value,
-                },
+                }
+            ],
+            "properties": {
+                "confidence": finding.confidence,
+                "framework": finding.framework,
+                "status": finding.status,
+                "auditType": audit.audit_type.value,
+                "ruleVersion": finding.rule_version,
+                "triageStatus": finding.triage_status.value,
+                "comparisonStatus": (
+                    finding.comparison_status.value if finding.comparison_status else None
+                ),
+                "owner": finding.owner,
+                "dueAt": finding.due_at.isoformat() if finding.due_at else None,
+                "ticketUrl": finding.ticket_url,
+                "suppressionExpiresAt": (
+                    finding.suppression_expires_at.isoformat()
+                    if finding.suppression_expires_at
+                    else None
+                ),
+                "verificationOutcome": (
+                    latest_verification.outcome.value if latest_verification else None
+                ),
+                "verificationCompletedAt": (
+                    latest_verification.completed_at.isoformat()
+                    if latest_verification
+                    else None
+                ),
+            },
+        }
+        if finding.fingerprint:
+            result["partialFingerprints"] = {
+                "perforaFindingFingerprint": finding.fingerprint,
             }
-        )
+        results.append(result)
     payload = {
         "version": "2.1.0",
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -68,11 +96,26 @@ def export_html(audit: AuditRecord) -> str:
           <p class="eyebrow">{html.escape(finding.framework)} · {html.escape(finding.severity)}</p>
           <h2>{html.escape(finding.title)}</h2>
           <p><code>{html.escape(finding.file)}:{finding.line}</code></p>
-          <p>{html.escape(finding.model_explanation or finding.explanation)}</p>
+          <p><strong>Triage:</strong> {html.escape(finding.triage_status.value)} ·
+          <strong>Change:</strong> {html.escape(finding.comparison_status.value if finding.comparison_status else "not classified")} ·
+          <strong>Owner:</strong> {html.escape(finding.owner or "unassigned")}</p>
+          <p><strong>Latest verification:</strong> {
+            html.escape(finding.verification_attempts[-1].outcome.value)
+            if finding.verification_attempts
+            else "not run"
+          }</p>
+          <p>{html.escape(finding.explanation)}</p>
           <h3>Evidence</h3>
           <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in finding.evidence)}</ul>
-          <h3>Recommendation</h3>
+          <h3>Deterministic recommendation</h3>
           <p>{html.escape(finding.recommendation)}</p>
+          {
+            f'''<h3>Model perspective</h3>
+          <p>{html.escape(finding.model_enrichment.explanation)}</p>
+          <p>{html.escape(finding.model_enrichment.recommendation or "")}</p>'''
+            if finding.model_enrichment
+            else ""
+        }
         </article>
         """
         for finding in audit.findings

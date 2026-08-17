@@ -1,7 +1,7 @@
 {
   "name": "@perfora/web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -25,4 +25,3 @@
     "vitest": "^3.2.4"
   }
 }
-

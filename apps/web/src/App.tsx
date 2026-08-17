@@ -36,14 +36,17 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./lib/api";
 import type {
+  AuditComparison,
   AuditRecord,
   AuditType,
   Finding,
+  FindingUpdate,
   ModelInfo,
   ProviderCatalog,
   ProviderId,
   RepositorySnapshot,
   SetupStatus,
+  TriageStatus,
 } from "./types";
 
 type View = "setup" | "repositories" | "new-audit" | "workspace" | "settings";
@@ -225,7 +228,8 @@ function App() {
           {view === "workspace" && (
             <AuditWorkspace
               audit={activeAudit}
-              onRefresh={() => activeAudit && refreshAudit(activeAudit.id)}
+              audits={audits}
+              onRefresh={() => activeAudit ? refreshAudit(activeAudit.id) : Promise.resolve()}
               onNewAudit={() => setView("new-audit")}
             />
           )}
@@ -823,52 +827,167 @@ function NewAuditView({
   );
 }
 
-function AuditWorkspace({ audit, onRefresh, onNewAudit }: { audit: AuditRecord | null; onRefresh: () => void; onNewAudit: () => void }) {
+const triageOptions: TriageStatus[] = [
+  "new",
+  "investigating",
+  "in_progress",
+  "resolved",
+  "false_positive",
+  "risk_accepted",
+  "reopened",
+];
+
+function readableStatus(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+function comparisonStatus(finding: Finding, comparison: AuditComparison | null) {
+  if (comparison?.regressed_finding_ids?.includes(finding.id)) return "regressed";
+  if (comparison?.severity_changes?.some((change) => change.finding_id === finding.id)) return "severity_changed";
+  if (comparison?.new_finding_ids?.includes(finding.id)) return "new";
+  if (comparison?.unchanged_finding_ids?.includes(finding.id)) return "unchanged";
+  return finding.comparison_status;
+}
+
+function AuditWorkspace({
+  audit,
+  audits,
+  onRefresh,
+  onNewAudit,
+}: {
+  audit: AuditRecord | null;
+  audits: AuditRecord[];
+  onRefresh: () => Promise<void>;
+  onNewAudit: () => void;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(audit?.findings[0]?.id ?? null);
+  const [baselineId, setBaselineId] = useState(audit?.baseline_audit_id ?? "");
+  const [comparison, setComparison] = useState<AuditComparison | null>(null);
+  const [comparisonError, setComparisonError] = useState("");
+  const [search, setSearch] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("all");
+  const [triageFilter, setTriageFilter] = useState("all");
+  const [comparisonFilter, setComparisonFilter] = useState("all");
+
   useEffect(() => {
-    if (audit?.findings.length && !audit.findings.some((finding) => finding.id === selectedId)) setSelectedId(audit.findings[0].id);
-  }, [audit?.findings, selectedId]);
+    setBaselineId(audit?.baseline_audit_id ?? "");
+    setComparison(null);
+  }, [audit?.id, audit?.baseline_audit_id]);
+
+  useEffect(() => {
+    if (!audit || !["completed", "partial"].includes(audit.status)) return;
+    let active = true;
+    setComparisonError("");
+    void api.compareAudit(audit.id, baselineId || undefined)
+      .then((result) => active && setComparison(result))
+      .catch((reason) => active && setComparisonError(reason instanceof Error ? reason.message : "Comparison failed"));
+    return () => { active = false; };
+  }, [audit?.id, audit?.status, baselineId]);
+
+  const eligibleBaselines = useMemo(() => {
+    if (!audit) return [];
+    return audits.filter((candidate) =>
+      candidate.id !== audit.id
+      && candidate.repository.path === audit.repository.path
+      && auditTypeOf(candidate) === auditTypeOf(audit)
+      && new Date(candidate.created_at) < new Date(audit.created_at)
+      && ["completed", "partial"].includes(candidate.status));
+  }, [audit, audits]);
+
+  const filteredFindings = useMemo(() => {
+    if (!audit) return [];
+    const query = search.trim().toLowerCase();
+    return audit.findings.filter((finding) => {
+      const delta = comparisonStatus(finding, comparison);
+      return (!query || `${finding.title} ${finding.file} ${finding.rule_id} ${finding.owner ?? ""}`.toLowerCase().includes(query))
+        && (severityFilter === "all" || finding.severity === severityFilter)
+        && (triageFilter === "all" || (finding.triage_status ?? "new") === triageFilter)
+        && (comparisonFilter === "all" || delta === comparisonFilter);
+    });
+  }, [audit, comparison, comparisonFilter, search, severityFilter, triageFilter]);
+
+  useEffect(() => {
+    if (filteredFindings.length && !filteredFindings.some((finding) => finding.id === selectedId)) {
+      setSelectedId(filteredFindings[0].id);
+    }
+  }, [filteredFindings, selectedId]);
+
   if (!audit) return <section className="page"><EmptyState icon={SearchCode} title="No audit selected" description="Start or open an audit to inspect its evidence." action={<button className="button primary" onClick={onNewAudit}>Create audit</button>} /></section>;
   const auditType = auditTypeOf(audit);
-  const selected = audit.findings.find((finding) => finding.id === selectedId) ?? audit.findings[0];
+  const selected = filteredFindings.find((finding) => finding.id === selectedId) ?? filteredFindings[0];
   const progress = audit.events.at(-1)?.progress ?? 0;
+  const skippedCoverage = Object.entries(audit.scan_coverage?.skipped_by_reason ?? {}).map(([reason, count]) => `${reason.replaceAll("_", " ")}: ${count}`).join(", ");
+  const scannedCoverage = Object.entries(audit.scan_coverage?.scanned_by_type ?? {}).map(([type, count]) => `${type.replaceAll("_", " ")}: ${count}`).join(", ");
   return (
     <section className="workspace-page">
       <div className="workspace-header">
-        <div><p className="eyebrow">{audit.repository.name} · {audit.repository.branch || "detached"}</p><h1>{auditType === "security" ? "Security evidence audit" : "Lifecycle performance audit"}</h1><div className="audit-meta"><span><Bot size={14} /> {providerNames[audit.provider]}/{audit.model_id}</span><span><GitBranch size={14} /> {audit.repository.commit_sha?.slice(0, 8) || "no commit"}</span><span><Clock3 size={14} /> {new Date(audit.created_at).toLocaleTimeString()}</span></div></div>
-        <div className="workspace-actions"><button className="button secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh</button><ExportMenu audit={audit} /></div>
+        <div><p className="eyebrow">{audit.repository.name} · {audit.repository.branch || "detached"}</p><h1>{auditType === "security" ? "Security evidence audit" : "Lifecycle performance audit"}</h1><div className="audit-meta"><span><Bot size={14} /> {providerNames[audit.provider]}/{audit.model_id}</span><span><GitBranch size={14} /> {audit.repository.commit_sha?.slice(0, 8) || "no commit"}</span><span><Code2 size={14} /> {audit.rule_pack ? `${audit.rule_pack.id}@${audit.rule_pack.version}` : "legacy rule pack"}</span><span><Clock3 size={14} /> {new Date(audit.created_at).toLocaleTimeString()}</span></div></div>
+        <div className="workspace-actions"><button className="button secondary" onClick={() => void onRefresh()}><RefreshCw size={16} /> Refresh</button><ExportMenu audit={audit} /></div>
       </div>
       <div className="progress-band"><div className="progress-copy"><span className={`pulse ${audit.status}`} /> <strong>{audit.events.at(-1)?.message || audit.status}</strong><span>{progress}%</span></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div>
       <div className="evidence-summary">
         <Metric label="Confirmed findings" displayValue={String(audit.findings.filter((finding) => finding.status === "confirmed").length)} icon={ShieldCheck} />
         <Metric label="High severity" displayValue={String(audit.findings.filter((finding) => ["high", "critical"].includes(finding.severity)).length)} icon={Zap} />
-        <Metric label="Files transmitted" displayValue={String(audit.context_manifest.length)} icon={FileCode2} />
+        <Metric label="Files scanned" displayValue={String(audit.scan_coverage?.files_scanned ?? 0)} icon={FileCode2} />
         <Metric label="Run status" displayValue={audit.status} icon={Activity} />
       </div>
       {audit.error && <Notice tone={audit.status === "partial" ? "warning" : "danger"} title={audit.status === "partial" ? "Partial audit" : "Audit failed"}>{audit.error}</Notice>}
+      {audit.scan_coverage && <div className="context-manifest coverage-manifest"><SearchCode size={16} /><span><strong>Scan coverage:</strong> discovered {audit.scan_coverage.files_discovered}, scanned {audit.scan_coverage.files_scanned}, skipped {audit.scan_coverage.files_skipped}. Scanned types: {scannedCoverage || "none"}. Skip reasons: {skippedCoverage || "none"}. Rules executed: {audit.scan_coverage.rules_executed.length}. Analyzer {audit.analyzer_version ?? "unknown"}.</span></div>}
+      {["completed", "partial"].includes(audit.status) && (
+        <div className="comparison-band">
+          <div className="comparison-heading"><div><p className="eyebrow">Baseline comparison</p><strong>{comparison?.baseline_audit_id ? `Against ${comparison.baseline_audit_id.slice(0, 8)}` : "First observed audit"}</strong></div><label>Baseline<select aria-label="Comparison baseline" value={baselineId} onChange={(event) => setBaselineId(event.target.value)}><option value="">Automatic previous audit</option>{eligibleBaselines.map((candidate) => <option key={candidate.id} value={candidate.id}>{new Date(candidate.created_at).toLocaleString()} · {candidate.id.slice(0, 8)}</option>)}</select></label></div>
+          <div className="comparison-metrics"><span><strong>{comparison?.new_finding_ids?.length ?? 0}</strong> New</span><span><strong>{comparison?.unchanged_finding_ids?.length ?? 0}</strong> Unchanged</span><span><strong>{comparison?.resolved_findings?.length ?? 0}</strong> Resolved</span><span className="danger"><strong>{comparison?.regressed_finding_ids?.length ?? 0}</strong> Regressed</span><span><strong>{comparison?.severity_changes?.length ?? 0}</strong> Severity changed</span></div>
+          {comparisonError && <p className="comparison-error">{comparisonError}</p>}
+        </div>
+      )}
+      <div className="findings-filters">
+        <label>Search<input aria-label="Search findings" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Title, file, rule, or owner" /></label>
+        <label>Severity<select aria-label="Filter severity" value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value)}><option value="all">All severities</option>{["critical", "high", "medium", "low"].map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label>Triage<select aria-label="Filter triage" value={triageFilter} onChange={(event) => setTriageFilter(event.target.value)}><option value="all">All triage states</option>{[...triageOptions, "verified_resolved" as TriageStatus].map((value) => <option key={value} value={value}>{readableStatus(value)}</option>)}</select></label>
+        <label>Change<select aria-label="Filter comparison" value={comparisonFilter} onChange={(event) => setComparisonFilter(event.target.value)}><option value="all">All changes</option>{["new", "unchanged", "regressed", "severity_changed"].map((value) => <option key={value} value={value}>{readableStatus(value)}</option>)}</select></label>
+      </div>
       <div className="investigation-grid">
         <aside className="findings-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Evidence queue</p><h2>Findings</h2></div><span>{audit.findings.length}</span></div>
-          {audit.findings.length === 0 ? <div className="panel-empty"><LoaderCircle className={audit.status === "running" ? "spin" : ""} /><strong>{audit.status === "running" ? `Analyzing ${auditType} evidence` : `No ${auditType} findings`}</strong></div> : audit.findings.map((finding) => <button key={finding.id} className={selected?.id === finding.id ? "finding-row selected" : "finding-row"} onClick={() => setSelectedId(finding.id)}><span className={`severity-mark ${finding.severity}`} /><div><span className="finding-framework">{finding.framework}</span><strong>{finding.title}</strong><small>{finding.file}:{finding.line}</small></div><span className="confidence">{Math.round(finding.confidence * 100)}%</span></button>)}
+          <div className="panel-heading"><div><p className="eyebrow">Evidence queue</p><h2>Findings</h2></div><span>{filteredFindings.length}</span></div>
+          {audit.findings.length === 0 ? <div className="panel-empty"><LoaderCircle className={audit.status === "running" ? "spin" : ""} /><strong>{audit.status === "running" ? `Analyzing ${auditType} evidence` : `No ${auditType} findings`}</strong></div> : filteredFindings.length === 0 ? <div className="panel-empty"><SearchCode /><strong>No findings match these filters</strong></div> : filteredFindings.map((finding) => { const delta = comparisonStatus(finding, comparison); return <button key={finding.id} className={selected?.id === finding.id ? "finding-row selected" : "finding-row"} onClick={() => setSelectedId(finding.id)}><span className={`severity-mark ${finding.severity}`} /><div><span className="finding-framework">{finding.framework}</span><strong>{finding.title}</strong><small>{finding.file}:{finding.line}</small><span className="row-statuses"><em>{readableStatus(finding.triage_status ?? "new")}</em>{delta && <em className={delta}>{readableStatus(delta)}</em>}</span></div><span className="confidence">{Math.round(finding.confidence * 100)}%</span></button>; })}
         </aside>
         <div className="detail-panel">
-          {selected ? <FindingDetail finding={selected} audit={audit} /> : <EmptyState icon={SearchCode} title="Waiting for evidence" description={auditType === "security" ? "The deterministic analyzer is inspecting application security controls." : "The deterministic analyzer is inspecting lifecycle ownership."} />}
+          {selected ? <FindingDetail finding={selected} audit={audit} onRefresh={onRefresh} /> : <EmptyState icon={SearchCode} title="No finding selected" description={audit.findings.length ? "Adjust the filters to continue triage." : auditType === "security" ? "The deterministic analyzer is inspecting application security controls." : "The deterministic analyzer is inspecting lifecycle ownership."} />}
         </div>
       </div>
     </section>
   );
 }
 
-function FindingDetail({ finding, audit }: { finding: Finding; audit: AuditRecord }) {
-  const [loading, setLoading] = useState(false);
+function dateInputValue(value?: string) {
+  return value ? value.slice(0, 10) : "";
+}
+
+function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit: AuditRecord; onRefresh: () => Promise<void> }) {
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [verificationLoading, setVerificationLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [triageStatus, setTriageStatus] = useState<TriageStatus>(finding.triage_status ?? "new");
+  const [owner, setOwner] = useState(finding.owner ?? "");
+  const [dueAt, setDueAt] = useState(dateInputValue(finding.due_at));
+  const [resolutionCommit, setResolutionCommit] = useState(finding.resolution_commit ?? "");
+  const [dispositionReason, setDispositionReason] = useState(finding.disposition_reason ?? "");
+  const [suppressionExpiresAt, setSuppressionExpiresAt] = useState(dateInputValue(finding.suppression_expires_at));
+  const [ticketUrl, setTicketUrl] = useState(finding.ticket_url ?? "");
+  const [note, setNote] = useState("");
   useEffect(() => {
-    setCopied(false);
-    setError("");
-  }, [finding.id]);
+    setCopied(false); setSaved(false); setError(""); setNote("");
+    setTriageStatus(finding.triage_status ?? "new"); setOwner(finding.owner ?? "");
+    setDueAt(dateInputValue(finding.due_at)); setResolutionCommit(finding.resolution_commit ?? "");
+    setDispositionReason(finding.disposition_reason ?? "");
+    setSuppressionExpiresAt(dateInputValue(finding.suppression_expires_at));
+    setTicketUrl(finding.ticket_url ?? "");
+  }, [finding]);
   const copyPrompt = async () => {
-    setLoading(true); setError("");
+    setPromptLoading(true); setError("");
     try {
       const result = await api.buildAgentPrompt(audit.id, finding.id);
       await writeClipboard(result.prompt);
@@ -877,18 +996,79 @@ function FindingDetail({ finding, audit }: { finding: Finding; audit: AuditRecor
       setCopied(false);
       setError(reason instanceof Error ? reason.message : "Prompt copy failed");
     } finally {
-      setLoading(false);
+      setPromptLoading(false);
     }
   };
+  const saveTriage = async () => {
+    setSaving(true); setSaved(false); setError("");
+    try {
+      const update: FindingUpdate = {
+        owner: owner || null,
+        due_at: dueAt ? new Date(`${dueAt}T23:59:59Z`).toISOString() : null,
+        resolution_commit: resolutionCommit || null,
+        disposition_reason: dispositionReason || null,
+        suppression_expires_at: suppressionExpiresAt ? new Date(`${suppressionExpiresAt}T23:59:59Z`).toISOString() : null,
+        ticket_url: ticketUrl || null,
+        note: note || undefined,
+      };
+      if (triageStatus !== "verified_resolved") update.triage_status = triageStatus;
+      await api.updateFinding(audit.id, finding.id, update);
+      setSaved(true);
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Finding update failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const verifyResolution = async () => {
+    setVerificationLoading(true); setError("");
+    try {
+      await api.verifyFinding(audit.id, finding.id);
+      await onRefresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Verification failed");
+    } finally {
+      setVerificationLoading(false);
+    }
+  };
+  const verificationAttempts = finding.verification_attempts ?? [];
+  const latestVerification = verificationAttempts.at(-1);
+  const canVerify = Boolean(finding.fingerprint)
+    && ["resolved", "verified_resolved"].includes(finding.triage_status ?? "new");
   return (
     <>
-      <div className="detail-heading"><div><div className="finding-tags"><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><span className="confirmed-pill"><ShieldCheck size={13} /> {finding.status}</span><span>{finding.framework}</span></div><h2>{finding.title}</h2><code>{finding.file}:{finding.line} · {finding.symbol}</code></div><button className="button primary" onClick={copyPrompt} disabled={loading}>{loading ? <LoaderCircle className="spin" /> : copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy prompt"}</button></div>
-      <div className="detail-section"><p className="eyebrow">Causal explanation</p><p className="lead-copy">{finding.model_explanation || finding.explanation}</p></div>
+      <div className="detail-heading"><div><div className="finding-tags"><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><span className="confirmed-pill"><ShieldCheck size={13} /> {finding.status}</span><span>{finding.framework}</span><span className={`triage-pill ${finding.triage_status ?? "new"}`}>{readableStatus(finding.triage_status ?? "new")}</span></div><h2>{finding.title}</h2><code>{finding.file}:{finding.line} · {finding.symbol}</code></div><button className="button primary" onClick={copyPrompt} disabled={promptLoading}>{promptLoading ? <LoaderCircle className="spin" /> : copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy prompt"}</button></div>
+      <div className="triage-panel">
+        <div className="triage-heading"><div><p className="eyebrow">Finding lifecycle</p><h3>Assign, decide, and document</h3></div><button className="button secondary" onClick={() => void saveTriage()} disabled={saving}>{saving ? <LoaderCircle className="spin" /> : saved ? <Check /> : <ShieldCheck />} {saved ? "Saved" : "Save triage"}</button></div>
+        <div className="triage-grid">
+          <label>Status<select aria-label="Triage status" value={triageStatus} onChange={(event) => setTriageStatus(event.target.value as TriageStatus)}>{finding.triage_status === "verified_resolved" && <option value="verified_resolved">verified resolved</option>}{triageOptions.map((value) => <option key={value} value={value}>{readableStatus(value)}</option>)}</select><small>Verified resolved is assigned only by a deterministic re-scan.</small></label>
+          <label>Owner<input aria-label="Finding owner" value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="Team or person" /></label>
+          <label>Due date<input aria-label="Finding due date" type="date" value={dueAt} onChange={(event) => setDueAt(event.target.value)} /></label>
+          <label>External ticket<input aria-label="External ticket" value={ticketUrl} onChange={(event) => setTicketUrl(event.target.value)} placeholder="Ticket URL or ID" /></label>
+          <label>Resolution commit<input aria-label="Resolution commit" value={resolutionCommit} onChange={(event) => setResolutionCommit(event.target.value)} placeholder="Commit SHA or reference" /></label>
+          <label>Suppression expires<input aria-label="Suppression expiration" type="date" value={suppressionExpiresAt} onChange={(event) => setSuppressionExpiresAt(event.target.value)} /></label>
+          <label className="wide">Disposition reason<textarea aria-label="Disposition reason" value={dispositionReason} onChange={(event) => setDispositionReason(event.target.value)} placeholder="Required for false positive and risk accepted" /></label>
+          <label className="wide">Add note<textarea aria-label="Finding note" value={note} onChange={(event) => setNote(event.target.value)} placeholder="Append context without replacing prior notes" /></label>
+        </div>
+        {(finding.notes?.length > 0 || finding.status_history?.length > 0) && <div className="triage-history"><p className="eyebrow">History</p>{finding.status_history?.map((change) => <div key={`${change.changed_at}-${change.to_status}`}><Clock3 size={14} /><span><strong>{readableStatus(change.from_status)} → {readableStatus(change.to_status)}</strong><small>{new Date(change.changed_at).toLocaleString()}{change.reason ? ` · ${change.reason}` : ""}</small></span></div>)}{finding.notes?.map((entry) => <div key={entry.id}><Code2 size={14} /><span><strong>Note</strong><small>{entry.body} · {new Date(entry.created_at).toLocaleString()}</small></span></div>)}</div>}
+      </div>
+      <div className="verification-panel">
+        <div className="verification-heading"><div><p className="eyebrow">Deterministic verification</p><h3>Prove the finding no longer reproduces</h3></div><button className="button secondary" onClick={() => void verifyResolution()} disabled={!canVerify || verificationLoading}>{verificationLoading ? <LoaderCircle className="spin" /> : <RefreshCw />} Verify resolution</button></div>
+        <p className="verification-guidance">Verification runs the same audit rule pack against the current repository. A result is certified only when the rule executes and the finding source is scanned or has been removed.</p>
+        {!finding.fingerprint && <div className="verification-blocked"><CircleAlert size={16} /><span>Legacy finding: run a new audit to create a stable fingerprint before verification.</span></div>}
+        {finding.fingerprint && !canVerify && <div className="verification-blocked"><CircleAlert size={16} /><span>Mark this finding resolved before running verification.</span></div>}
+        {latestVerification && <div className={`verification-result ${latestVerification.outcome}`}><div><span className="verification-outcome">{readableStatus(latestVerification.outcome)}</span><strong>{latestVerification.message}</strong><small>{new Date(latestVerification.completed_at).toLocaleString()} · analyzer {latestVerification.analyzer_version} · {latestVerification.rule_pack.id}@{latestVerification.rule_pack.version}</small></div><div className="verification-checks"><span className={latestVerification.rule_executed ? "passed" : "failed"}>{latestVerification.rule_executed ? <Check /> : <X />} Rule executed</span><span className={latestVerification.file_scanned || !latestVerification.source_present ? "passed" : "failed"}>{latestVerification.file_scanned || !latestVerification.source_present ? <Check /> : <X />} {latestVerification.source_present ? "Source scanned" : "Source removed"}</span></div>{latestVerification.observed_evidence.length > 0 && <div className="verification-observed"><strong>Current evidence</strong>{latestVerification.observed_evidence.map((item) => <span key={item}>{item}</span>)}</div>}</div>}
+        {verificationAttempts.length > 1 && <details className="verification-history"><summary>{verificationAttempts.length} verification attempts</summary>{verificationAttempts.slice().reverse().map((attempt) => <div key={attempt.id}><span className={`verification-dot ${attempt.outcome}`} /><strong>{readableStatus(attempt.outcome)}</strong><small>{new Date(attempt.completed_at).toLocaleString()} · {attempt.message}</small></div>)}</details>}
+      </div>
+      <div className="detail-section"><p className="eyebrow">Deterministic explanation</p><p className="lead-copy">{finding.explanation}</p></div>
       <div className="detail-section"><p className="eyebrow">Deterministic evidence</p><div className="evidence-list">{finding.evidence.map((evidenceLine) => <div key={evidenceLine}><CircleCheck size={16} /><span>{evidenceLine}</span></div>)}</div></div>
-      <div className="detail-section recommendation"><div className="recommendation-icon"><Sparkles size={19} /></div><div><p className="eyebrow">Recommended change</p><p>{finding.recommendation}</p></div></div>
+      <div className="detail-section recommendation"><div className="recommendation-icon"><ShieldCheck size={19} /></div><div><p className="eyebrow">Deterministic recommendation</p><p>{finding.recommendation}</p></div></div>
+      {finding.model_enrichment && <div className="detail-section recommendation"><div className="recommendation-icon"><Sparkles size={19} /></div><div><p className="eyebrow">Model perspective · {finding.model_enrichment.provider ?? audit.provider}/{finding.model_enrichment.model_id ?? audit.model_id}</p><p>{finding.model_enrichment.explanation}{finding.model_enrichment.recommendation ? ` ${finding.model_enrichment.recommendation}` : ""}</p></div></div>}
+      <div className="context-manifest"><Code2 size={16} /><span><strong>Finding identity:</strong> {finding.rule_id}@{finding.rule_version || "legacy"} · {finding.fingerprint || "legacy record without fingerprint"}</span></div>
       <div className="context-manifest"><LockKeyhole size={16} /><span><strong>Context manifest:</strong> only {audit.context_manifest.length ? audit.context_manifest.join(", ") : "deterministic evidence"} was selected for model enrichment.</span></div>
       <div className="context-manifest"><Copy size={16} /><span><strong>Agent handoff:</strong> Copy prompt assembles the audit provenance, all finding evidence and recommendations, repository state, and the complete secret-redacted source file. It does not contact a model or modify the repository.</span></div>
-      {error && <Notice tone="danger" title="Copy prompt">{error}</Notice>}
+      {error && <Notice tone="danger" title="Finding action">{error}</Notice>}
     </>
   );
 }
@@ -901,8 +1081,8 @@ function SettingsView({ setup, onRefresh }: { setup: SetupStatus | null; onRefre
         <div className="settings-main">
           <SectionTitle title="Model providers" subtitle="Dynamic discovery, explicit selection" />
           {(setup?.providers ?? []).map((provider) => <div className="setting-row" key={provider.provider}><div className={`provider-logo ${provider.provider}`}>{provider.provider === "openai" ? <Sparkles /> : provider.provider === "ollama" ? <Box /> : <TerminalSquare />}</div><div><strong>{providerNames[provider.provider]}</strong><span>{provider.detail}</span></div><div className="setting-row-tail"><StatusPill ready={provider.available} /><span>{provider.models.length} models</span></div></div>)}
-          <SectionTitle title="Verification policy" subtitle="Commands are shown before execution" />
-          {["dart analyze", "flutter analyze", "flutter test"].map((command) => <div className="command-row" key={command}><TerminalSquare size={16} /><code>{command}</code><span><Check size={14} /> built-in safe</span></div>)}
+          <SectionTitle title="Evidence policy" subtitle="Trust boundaries are explicit" />
+          {["Deterministic evidence remains authoritative", "Model enrichment is labeled separately", "Agent handoff never modifies the repository"].map((policy) => <div className="command-row" key={policy}><ShieldCheck size={16} /><span>{policy}</span><span><Check size={14} /> enforced</span></div>)}
         </div>
         <aside className="privacy-panel">
           <div className="privacy-illustration"><ShieldCheck size={38} /><span className="orbit one" /><span className="orbit two" /></div>

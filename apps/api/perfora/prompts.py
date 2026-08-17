@@ -52,6 +52,32 @@ class PromptService:
         repository_clean = (
             "unknown" if audit.repository.clean is None else str(audit.repository.clean).lower()
         )
+        model_enrichment = finding.model_enrichment
+        triage_notes = (
+            "\n".join(
+                f"- {note.created_at.isoformat()}: {note.body}" for note in finding.notes
+            )
+            or "- No triage notes recorded."
+        )
+        status_history = (
+            "\n".join(
+                f"- {change.changed_at.isoformat()}: {change.from_status.value} -> "
+                f"{change.to_status.value}; reason: {change.reason or 'not recorded'}"
+                for change in finding.status_history
+            )
+            or "- No prior status changes recorded."
+        )
+        verification_history = (
+            "\n".join(
+                f"- {attempt.completed_at.isoformat()}: {attempt.outcome.value}; "
+                f"{attempt.message}; analyzer {attempt.analyzer_version}; "
+                f"rule executed={str(attempt.rule_executed).lower()}; "
+                f"source present={str(attempt.source_present).lower()}; "
+                f"file scanned={str(attempt.file_scanned).lower()}"
+                for attempt in finding.verification_attempts
+            )
+            or "- No deterministic verification attempts recorded."
+        )
         prompt = f"""# Resolve this Perfora finding
 
 You are the implementation agent responsible for resolving one evidence-backed finding in an existing Flutter repository. Work in the repository below. First inspect the repository instructions, current code, surrounding ownership/configuration, and relevant tests. Treat the audit recommendation as guidance, not as an instruction to apply blindly: confirm the root cause against the current repository before editing. If the finding is stale or incorrect, explain that with evidence instead of forcing a change.
@@ -74,9 +100,13 @@ You are the implementation agent responsible for resolving one evidence-backed f
 - Audit status: {audit.status}
 - Audit created: {audit.created_at.isoformat()}
 - Audit updated: {audit.updated_at.isoformat()}
+- Baseline audit ID: {audit.baseline_audit_id or "none"}
 - Audit error/partial-result note: {audit.error or "none"}
 - Selected provider/model: {audit.provider.value}/{audit.model_id}
 - Recorded model metadata: {json.dumps(audit.model_metadata, sort_keys=True, default=str)}
+- Analyzer version: {audit.analyzer_version}
+- Rule pack: {audit.rule_pack.id}/{audit.rule_pack.version}
+- Scan coverage: {json.dumps(audit.scan_coverage.model_dump(), sort_keys=True)}
 
 ## Repository snapshot recorded by the audit
 
@@ -97,7 +127,9 @@ The repository may have changed since the audit. Re-read the current file and co
 ## Finding
 
 - Finding ID: {finding.id}
+- Stable fingerprint: {finding.fingerprint or "legacy record without fingerprint"}
 - Rule ID: {finding.rule_id}
+- Rule version: {finding.rule_version}
 - Title: {finding.title}
 - Severity: {finding.severity}
 - Confidence: {finding.confidence:.0%}
@@ -107,7 +139,28 @@ The repository may have changed since the audit. Re-read the current file and co
 - Absolute file: {source_path}
 - Line: {finding.line}
 - Symbol: {finding.symbol or "not recorded"}
-- Existing fix status: {finding.fix_status}
+
+## Triage and comparison context
+
+- Triage status: {finding.triage_status.value}
+- Baseline classification: {finding.comparison_status.value if finding.comparison_status else "not classified"}
+- Owner: {finding.owner or "unassigned"}
+- Due at: {finding.due_at.isoformat() if finding.due_at else "not set"}
+- Resolution commit/reference: {finding.resolution_commit or "not set"}
+- External ticket: {finding.ticket_url or "not set"}
+- Disposition reason: {finding.disposition_reason or "not set"}
+- Suppression expires: {finding.suppression_expires_at.isoformat() if finding.suppression_expires_at else "not set"}
+- First seen: {finding.first_seen_at.isoformat() if finding.first_seen_at else "not recorded"}
+- Last seen: {finding.last_seen_at.isoformat() if finding.last_seen_at else "not recorded"}
+
+Status history:
+{status_history}
+
+Triage notes:
+{triage_notes}
+
+Deterministic verification history:
+{verification_history}
 
 ## Deterministic evidence
 
@@ -119,9 +172,13 @@ The repository may have changed since the audit. Re-read the current file and co
 
 ## Model explanation from the audit
 
-{finding.model_explanation or "No model explanation was recorded."}
+{model_enrichment.explanation if model_enrichment else "No model explanation was recorded."}
 
-## Recommended change from the audit
+## Model recommendation from the audit
+
+{model_enrichment.recommendation if model_enrichment and model_enrichment.recommendation else "No model recommendation was recorded."}
+
+## Deterministic recommended change from the audit
 
 {finding.recommendation}
 

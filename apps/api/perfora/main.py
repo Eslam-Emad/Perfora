@@ -10,13 +10,14 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from .analyzer_client import DartAnalyzerClient
 from .audits import AuditCoordinator
+from .comparisons import AuditComparisonService, ComparisonError
 from .config import settings
 from .database import AuditStore
-from .domain import AuditCreate, FixApplyRequest, RepositoryRequest
+from .domain import AuditCreate, FindingUpdate, RepositoryRequest
 from .exports import export_html, export_json, export_sarif
-from .fixes import FixSafetyError, FixService
+from .findings import FindingService, FindingUpdateError
 from .prompts import PromptBuildError, PromptService
-from .providers import ProviderRegistry, ProviderRequestError
+from .providers import ProviderRegistry
 from .repositories import (
     RepositoryPickerCancelled,
     RepositoryPickerError,
@@ -24,12 +25,16 @@ from .repositories import (
     pick_repository_path,
 )
 from .setup import tool_health
+from .verifications import VerificationError, VerificationService
 
 store = AuditStore(settings.database_path)
 providers = ProviderRegistry(settings)
-coordinator = AuditCoordinator(store, DartAnalyzerClient(settings), providers)
-fixes = FixService(store, providers)
+analyzer = DartAnalyzerClient(settings)
+coordinator = AuditCoordinator(store, analyzer, providers)
 prompts = PromptService(store)
+findings = FindingService(store)
+comparisons = AuditComparisonService(store)
+verifications = VerificationService(store, analyzer)
 
 
 @asynccontextmanager
@@ -39,7 +44,7 @@ async def lifespan(_: FastAPI):
     await coordinator.stop()
 
 
-app = FastAPI(title="Perfora API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Perfora API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -51,7 +56,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"name": "Perfora", "status": "ready", "version": "0.1.0"}
+    return {"name": "Perfora", "status": "ready", "version": "0.2.0"}
 
 
 @app.get("/api/setup")
@@ -128,6 +133,36 @@ async def get_audit(audit_id: str):
     return audit
 
 
+@app.get("/api/audits/{audit_id}/comparison")
+async def compare_audit(audit_id: str, baseline_id: str | None = None):
+    try:
+        return comparisons.compare(audit_id, baseline_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Audit or baseline not found") from None
+    except ComparisonError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+
+
+@app.patch("/api/audits/{audit_id}/findings/{finding_id}")
+async def update_finding(audit_id: str, finding_id: str, request: FindingUpdate):
+    try:
+        return findings.update(audit_id, finding_id, request)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Audit or finding not found") from None
+    except FindingUpdateError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+
+
+@app.post("/api/audits/{audit_id}/findings/{finding_id}/verify")
+async def verify_finding(audit_id: str, finding_id: str):
+    try:
+        return await verifications.verify(audit_id, finding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Audit or finding not found") from None
+    except VerificationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
 @app.get("/api/audits/{audit_id}/events")
 async def stream_audit_events(audit_id: str):
     if not store.get(audit_id):
@@ -162,18 +197,6 @@ async def export_audit(audit_id: str, format: str = Query(pattern="^(json|html|s
     return PlainTextResponse(exporters[format](audit), media_type=media_types[format])
 
 
-@app.post("/api/audits/{audit_id}/findings/{finding_id}/fix")
-async def propose_fix(audit_id: str, finding_id: str):
-    try:
-        return await fixes.propose(audit_id, finding_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Audit or finding not found") from None
-    except FixSafetyError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-    except ProviderRequestError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from None
-
-
 @app.post("/api/audits/{audit_id}/findings/{finding_id}/prompt")
 async def build_agent_prompt(audit_id: str, finding_id: str):
     try:
@@ -181,24 +204,4 @@ async def build_agent_prompt(audit_id: str, finding_id: str):
     except KeyError:
         raise HTTPException(status_code=404, detail="Audit or finding not found") from None
     except PromptBuildError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-
-
-@app.post("/api/audits/{audit_id}/findings/{finding_id}/apply")
-async def apply_fix(audit_id: str, finding_id: str, request: FixApplyRequest):
-    try:
-        return await fixes.apply(audit_id, finding_id, request)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Audit or finding not found") from None
-    except (FixSafetyError, ValueError) as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-
-
-@app.post("/api/audits/{audit_id}/findings/{finding_id}/rollback")
-async def rollback_fix(audit_id: str, finding_id: str):
-    try:
-        return await fixes.rollback(audit_id, finding_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Audit or finding not found") from None
-    except FixSafetyError as error:
         raise HTTPException(status_code=409, detail=str(error)) from None

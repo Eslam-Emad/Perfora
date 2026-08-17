@@ -7,9 +7,12 @@ void main() {
   test('finds missing cleanup across supported framework families', () async {
     final root =
         Directory('${Directory.current.path}/test/fixtures/lifecycle_app');
-    final findings = await LifecycleAnalyzer().analyze(root);
+    final report = await LifecycleAnalyzer().analyze(root);
+    final findings = report.findings;
 
     expect(findings, hasLength(4));
+    expect(report.rulePackVersion, lifecycleRulePackVersion);
+    expect(findings.every((finding) => finding.ruleVersion == '1.0.0'), isTrue);
     expect(
       findings.map((finding) => finding.framework).toSet(),
       {'Riverpod', 'Provider', 'Bloc/Cubit', 'GetX'},
@@ -18,7 +21,7 @@ void main() {
 
   test('ignores a resource released in dispose', () async {
     final root = Directory('${Directory.current.path}/test/fixtures/clean_app');
-    final findings = await LifecycleAnalyzer().analyze(root);
+    final findings = (await LifecycleAnalyzer().analyze(root)).findings;
 
     expect(findings, isEmpty);
   });
@@ -27,9 +30,11 @@ void main() {
       () async {
     final root =
         Directory('${Directory.current.path}/test/fixtures/security_app');
-    final findings = await SecurityAnalyzer().analyze(root);
+    final report = await SecurityAnalyzer().analyze(root);
+    final findings = report.findings;
 
     expect(findings, hasLength(5));
+    expect(report.rulePackVersion, securityRulePackVersion);
     expect(
       findings.map((finding) => finding.ruleId).toSet(),
       {
@@ -50,7 +55,7 @@ void main() {
       () async {
     final root =
         Directory('${Directory.current.path}/test/fixtures/secure_app');
-    final findings = await SecurityAnalyzer().analyze(root);
+    final findings = (await SecurityAnalyzer().analyze(root)).findings;
 
     expect(findings, isEmpty);
   });
@@ -67,11 +72,56 @@ void main() {
       await podPlist.create(recursive: true);
       await podPlist.writeAsBytes([0xff, 0xfe, 0xfd]);
 
-      final findings = await SecurityAnalyzer().analyze(root);
+      final report = await SecurityAnalyzer().analyze(root);
 
-      expect(findings, isEmpty);
+      expect(report.findings, isEmpty);
+      expect(report.coverage.skippedByReason['unreadable_or_binary'], 1);
+      expect(report.coverage.skippedByReason['ignored_directory'], 1);
     } finally {
       await root.delete(recursive: true);
     }
+  });
+
+  test('reports generated, vendor, unsupported, and malformed coverage',
+      () async {
+    final root =
+        Directory('${Directory.current.path}/test/fixtures/coverage_app');
+
+    final report = await SecurityAnalyzer().analyze(root);
+
+    expect(report.findings, isEmpty);
+    expect(report.coverage.filesDiscovered, 7);
+    expect(report.coverage.filesScanned, 2);
+    expect(report.coverage.scannedByType, {'dart': 2});
+    expect(report.coverage.scannedFiles, contains('lib/live.dart'));
+    expect(report.coverage.scannedFiles, contains('lib/malformed.dart'));
+    expect(report.coverage.skippedByReason, {
+      'generated_source': 1,
+      'ignored_directory': 2,
+      'unsupported_file': 2,
+    });
+    expect(
+      report.coverage.skippedFilesByReason['generated_source'],
+      contains('lib/generated.g.dart'),
+    );
+  });
+
+  test('applies include and exclude globs with explicit coverage', () async {
+    final root =
+        Directory('${Directory.current.path}/test/fixtures/coverage_app');
+
+    final report = await SecurityAnalyzer().analyze(
+      root,
+      includePaths: const ['lib/**'],
+      excludePaths: const ['**/*.g.dart'],
+    );
+
+    expect(report.coverage.filesDiscovered, 7);
+    expect(report.coverage.filesScanned, 2);
+    expect(report.coverage.skippedByReason['path_excluded'], 5);
+    expect(
+      report.coverage.skippedFilesByReason['path_excluded'],
+      contains('lib/generated.g.dart'),
+    );
   });
 }

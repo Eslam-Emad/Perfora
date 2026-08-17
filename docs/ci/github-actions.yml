@@ -1,0 +1,87 @@
+name: Perfora audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+env:
+  PERFORA_REF: main # Pin to a reviewed tag or full commit SHA in production.
+  PERFORA_REPOSITORY: .
+
+jobs:
+  deterministic-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out application with history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check out Perfora
+        uses: actions/checkout@v6
+        with:
+          repository: Eslam-Emad/Perfora
+          ref: ${{ env.PERFORA_REF }}
+          path: .perfora-tool
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Install Perfora
+        run: |
+          python -m pip install -e ./.perfora-tool/apps/api
+          (cd .perfora-tool/tools/analyzer && dart pub get)
+
+      - name: Run provider-free audit
+        id: audit
+        shell: bash
+        env:
+          BASELINE_REF: origin/${{ github.base_ref || github.event.repository.default_branch }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          perfora audit \
+            --repository "$PERFORA_REPOSITORY" \
+            --baseline "$BASELINE_REF" \
+            --format sarif \
+            --output artifacts/perfora.sarif \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --exclude ".perfora-tool/**" \
+            --fail-on new-high \
+            --deterministic-only
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Retain Perfora artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perfora-audit
+          path: |
+            artifacts/perfora.sarif
+          retention-days: 14
+
+      - name: Upload SARIF to code scanning
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: artifacts/perfora.sarif
+
+      - name: Enforce Perfora result
+        if: ${{ always() }}
+        shell: bash
+        run: exit "${{ steps.audit.outputs.status || '3' }}"

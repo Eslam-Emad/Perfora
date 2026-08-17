@@ -7,6 +7,10 @@ import 'package:analyzer/dart/ast/ast.dart';
 import 'package:analyzer/dart/ast/visitor.dart';
 import 'package:path/path.dart' as path;
 
+const analyzerVersion = '0.4.0';
+const lifecycleRulePackVersion = '1.0.0';
+const securityRulePackVersion = '1.0.0';
+
 const _ignoredDirectories = {
   '.git',
   '.dart_tool',
@@ -27,6 +31,7 @@ const _ignoredSuffixes = {
 final class AnalyzerFinding {
   const AnalyzerFinding({
     required this.ruleId,
+    required this.ruleVersion,
     required this.title,
     required this.severity,
     required this.confidence,
@@ -40,6 +45,7 @@ final class AnalyzerFinding {
   });
 
   final String ruleId;
+  final String ruleVersion;
   final String title;
   final String severity;
   final double confidence;
@@ -53,6 +59,7 @@ final class AnalyzerFinding {
 
   Map<String, Object> toJson() => {
         'rule_id': ruleId,
+        'rule_version': ruleVersion,
         'title': title,
         'severity': severity,
         'confidence': confidence,
@@ -66,19 +73,103 @@ final class AnalyzerFinding {
       };
 }
 
+final class AnalyzerCoverage {
+  AnalyzerCoverage({required this.rulesExecuted});
+
+  int filesDiscovered = 0;
+  int filesScanned = 0;
+  final Map<String, int> scannedByType = {};
+  final Map<String, int> skippedByReason = {};
+  final List<String> scannedFiles = [];
+  final Map<String, List<String>> skippedFilesByReason = {};
+  final List<String> rulesExecuted;
+
+  void scan(String type, String file) {
+    filesScanned += 1;
+    scannedByType.update(type, (count) => count + 1, ifAbsent: () => 1);
+    scannedFiles.add(file);
+  }
+
+  void skip(String reason, String file) {
+    skippedByReason.update(reason, (count) => count + 1, ifAbsent: () => 1);
+    skippedFilesByReason.putIfAbsent(reason, () => []).add(file);
+  }
+
+  Map<String, Object> toJson() => {
+        'files_discovered': filesDiscovered,
+        'files_scanned': filesScanned,
+        'files_skipped': skippedByReason.values
+            .fold<int>(0, (total, count) => total + count),
+        'scanned_by_type': scannedByType,
+        'skipped_by_reason': skippedByReason,
+        'rules_executed': rulesExecuted,
+        'scanned_files': [...scannedFiles]..sort(),
+        'skipped_files_by_reason': {
+          for (final entry in skippedFilesByReason.entries)
+            entry.key: [...entry.value]..sort(),
+        },
+      };
+}
+
+final class AnalyzerReport {
+  const AnalyzerReport({
+    required this.rulePackId,
+    required this.rulePackVersion,
+    required this.coverage,
+    required this.findings,
+  });
+
+  final String rulePackId;
+  final String rulePackVersion;
+  final AnalyzerCoverage coverage;
+  final List<AnalyzerFinding> findings;
+
+  Map<String, Object> toJson() => {
+        'analyzer_version': analyzerVersion,
+        'rule_pack': {'id': rulePackId, 'version': rulePackVersion},
+        'coverage': coverage.toJson(),
+        'findings': findings.map((finding) => finding.toJson()).toList(),
+      };
+}
+
 final class LifecycleAnalyzer {
-  Future<List<AnalyzerFinding>> analyze(Directory root) async {
+  Future<AnalyzerReport> analyze(
+    Directory root, {
+    List<String> includePaths = const [],
+    List<String> excludePaths = const [],
+  }) async {
     final findings = <AnalyzerFinding>[];
+    final pathFilter = _AnalyzerPathFilter(includePaths, excludePaths);
+    final coverage = AnalyzerCoverage(
+      rulesExecuted: const ['lifecycle.missing_cleanup'],
+    );
     await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (entity is! File || !entity.path.endsWith('.dart')) continue;
-      final relativePath = path.relative(entity.path, from: root.path);
+      if (entity is! File) continue;
+      coverage.filesDiscovered += 1;
+      final relativePath = _normalizedRelativePath(entity, root);
+      if (!pathFilter.allows(relativePath)) {
+        coverage.skip('path_excluded', relativePath);
+        continue;
+      }
       final parts = path.split(relativePath);
-      if (parts.any(_ignoredDirectories.contains) ||
-          _ignoredSuffixes.any(relativePath.endsWith)) {
+      if (parts.any(_ignoredDirectories.contains)) {
+        coverage.skip('ignored_directory', relativePath);
+        continue;
+      }
+      if (!entity.path.endsWith('.dart')) {
+        coverage.skip('unsupported_file', relativePath);
+        continue;
+      }
+      if (_ignoredSuffixes.any(relativePath.endsWith)) {
+        coverage.skip('generated_source', relativePath);
         continue;
       }
       final content = await _readTextFile(entity);
-      if (content == null) continue;
+      if (content == null) {
+        coverage.skip('unreadable_or_binary', relativePath);
+        continue;
+      }
+      coverage.scan('dart', relativePath);
       final result = parseString(
         content: content,
         path: entity.path,
@@ -96,7 +187,12 @@ final class LifecycleAnalyzer {
       final fileOrder = left.file.compareTo(right.file);
       return fileOrder == 0 ? left.line.compareTo(right.line) : fileOrder;
     });
-    return findings;
+    return AnalyzerReport(
+      rulePackId: 'performance',
+      rulePackVersion: lifecycleRulePackVersion,
+      coverage: coverage,
+      findings: findings,
+    );
   }
 }
 
@@ -167,6 +263,7 @@ final class _LifecycleVisitor extends RecursiveAstVisitor<void> {
         findings.add(
           AnalyzerFinding(
             ruleId: 'lifecycle.missing_cleanup',
+            ruleVersion: lifecycleRulePackVersion,
             title: '$resolvedType is not released',
             severity: resolvedType == 'AnimationController' ? 'high' : 'medium',
             confidence: 0.94,
@@ -234,18 +331,47 @@ final class _LifecycleVisitor extends RecursiveAstVisitor<void> {
 }
 
 final class SecurityAnalyzer {
-  Future<List<AnalyzerFinding>> analyze(Directory root) async {
+  Future<AnalyzerReport> analyze(
+    Directory root, {
+    List<String> includePaths = const [],
+    List<String> excludePaths = const [],
+  }) async {
     final findings = <AnalyzerFinding>[];
+    final pathFilter = _AnalyzerPathFilter(includePaths, excludePaths);
+    final coverage = AnalyzerCoverage(
+      rulesExecuted: const [
+        'security.hardcoded_secret',
+        'security.insecure_transport',
+        'security.tls_validation_disabled',
+        'security.android.cleartext_traffic',
+        'security.ios.arbitrary_loads',
+      ],
+    );
     await for (final entity in root.list(recursive: true, followLinks: false)) {
       if (entity is! File) continue;
-      final relativePath = path.relative(entity.path, from: root.path);
+      coverage.filesDiscovered += 1;
+      final relativePath = _normalizedRelativePath(entity, root);
+      if (!pathFilter.allows(relativePath)) {
+        coverage.skip('path_excluded', relativePath);
+        continue;
+      }
       final parts = path.split(relativePath);
-      if (parts.any(_ignoredDirectories.contains)) continue;
+      if (parts.any(_ignoredDirectories.contains)) {
+        coverage.skip('ignored_directory', relativePath);
+        continue;
+      }
 
-      if (entity.path.endsWith('.dart') &&
-          !_ignoredSuffixes.any(relativePath.endsWith)) {
+      if (entity.path.endsWith('.dart')) {
+        if (_ignoredSuffixes.any(relativePath.endsWith)) {
+          coverage.skip('generated_source', relativePath);
+          continue;
+        }
         final content = await _readTextFile(entity);
-        if (content == null) continue;
+        if (content == null) {
+          coverage.skip('unreadable_or_binary', relativePath);
+          continue;
+        }
+        coverage.scan('dart', relativePath);
         final result = parseString(
           content: content,
           path: entity.path,
@@ -263,7 +389,11 @@ final class SecurityAnalyzer {
 
       if (_isAndroidAppManifest(parts)) {
         final content = await _readTextFile(entity);
-        if (content == null) continue;
+        if (content == null) {
+          coverage.skip('unreadable_or_binary', relativePath);
+          continue;
+        }
+        coverage.scan('android_manifest', relativePath);
         final match = RegExp(
           r'''android:usesCleartextTraffic\s*=\s*["']true["']''',
           caseSensitive: false,
@@ -272,6 +402,7 @@ final class SecurityAnalyzer {
           findings.add(
             AnalyzerFinding(
               ruleId: 'security.android.cleartext_traffic',
+              ruleVersion: securityRulePackVersion,
               title: 'Android cleartext traffic is enabled',
               severity: 'high',
               confidence: 0.99,
@@ -295,7 +426,11 @@ final class SecurityAnalyzer {
 
       if (_isIosRunnerPlist(parts)) {
         final content = await _readTextFile(entity);
-        if (content == null) continue;
+        if (content == null) {
+          coverage.skip('unreadable_or_binary', relativePath);
+          continue;
+        }
+        coverage.scan('ios_plist', relativePath);
         final match = RegExp(
           r'<key>\s*NSAllowsArbitraryLoads\s*</key>\s*<true\s*/>',
           caseSensitive: false,
@@ -304,6 +439,7 @@ final class SecurityAnalyzer {
           findings.add(
             AnalyzerFinding(
               ruleId: 'security.ios.arbitrary_loads',
+              ruleVersion: securityRulePackVersion,
               title: 'iOS App Transport Security is disabled globally',
               severity: 'high',
               confidence: 0.99,
@@ -322,13 +458,20 @@ final class SecurityAnalyzer {
             ),
           );
         }
+        continue;
       }
+      coverage.skip('unsupported_file', relativePath);
     }
     findings.sort((left, right) {
       final fileOrder = left.file.compareTo(right.file);
       return fileOrder == 0 ? left.line.compareTo(right.line) : fileOrder;
     });
-    return findings;
+    return AnalyzerReport(
+      rulePackId: 'security',
+      rulePackVersion: securityRulePackVersion,
+      coverage: coverage,
+      findings: findings,
+    );
   }
 }
 
@@ -362,6 +505,7 @@ final class _SecurityVisitor extends RecursiveAstVisitor<void> {
         findings.add(
           AnalyzerFinding(
             ruleId: 'security.hardcoded_secret',
+            ruleVersion: securityRulePackVersion,
             title: 'Sensitive credential is hardcoded in source',
             severity: 'critical',
             confidence: 0.96,
@@ -395,6 +539,7 @@ final class _SecurityVisitor extends RecursiveAstVisitor<void> {
       findings.add(
         AnalyzerFinding(
           ruleId: 'security.insecure_transport',
+          ruleVersion: securityRulePackVersion,
           title: 'Cleartext HTTP endpoint is embedded in source',
           severity: 'high',
           confidence: 0.98,
@@ -426,6 +571,7 @@ final class _SecurityVisitor extends RecursiveAstVisitor<void> {
       findings.add(
         AnalyzerFinding(
           ruleId: 'security.tls_validation_disabled',
+          ruleVersion: securityRulePackVersion,
           title: 'TLS certificate validation is disabled',
           severity: 'critical',
           confidence: 0.99,
@@ -473,6 +619,52 @@ bool _isIosRunnerPlist(List<String> parts) {
   return parts[offset] == 'ios' &&
       parts[offset + 1] == 'Runner' &&
       parts.last == 'Info.plist';
+}
+
+String _normalizedRelativePath(File file, Directory root) =>
+    path.relative(file.path, from: root.path).replaceAll('\\', '/');
+
+final class _AnalyzerPathFilter {
+  _AnalyzerPathFilter(List<String> includes, List<String> excludes)
+      : _includes = includes.map(_compileGlob).toList(),
+        _excludes = excludes.map(_compileGlob).toList();
+
+  final List<RegExp> _includes;
+  final List<RegExp> _excludes;
+
+  bool allows(String relativePath) {
+    final included = _includes.isEmpty ||
+        _includes.any((pattern) => pattern.hasMatch(relativePath));
+    return included &&
+        !_excludes.any((pattern) => pattern.hasMatch(relativePath));
+  }
+}
+
+RegExp _compileGlob(String rawPattern) {
+  final pattern = rawPattern.trim().replaceAll('\\', '/');
+  final expression = StringBuffer('^');
+  var index = 0;
+  while (index < pattern.length) {
+    final character = pattern[index];
+    if (character == '*') {
+      final isDouble = index + 1 < pattern.length && pattern[index + 1] == '*';
+      if (isDouble) {
+        final followedBySlash =
+            index + 2 < pattern.length && pattern[index + 2] == '/';
+        expression.write(followedBySlash ? r'(?:.*/)?' : r'.*');
+        index += followedBySlash ? 3 : 2;
+        continue;
+      }
+      expression.write(r'[^/]*');
+    } else if (character == '?') {
+      expression.write(r'[^/]');
+    } else {
+      expression.write(RegExp.escape(character));
+    }
+    index += 1;
+  }
+  expression.write(r'$');
+  return RegExp(expression.toString());
 }
 
 Future<String?> _readTextFile(File file) async {

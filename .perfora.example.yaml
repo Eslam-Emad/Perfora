@@ -1,15 +1,31 @@
 version: 1
-include:
-  - lib/**
+
+audit:
+  types:
+    - security
+    - performance
+
+policy:
+  fail_on:
+    severity: high
+    only_new: true
+
+# Leave include empty to inspect every supported source and platform manifest.
+# Add patterns only when deliberately selecting packages in a monorepo.
+include: []
 exclude:
   - "**/*.g.dart"
   - "**/*.freezed.dart"
   - build/**
-rules:
-  lifecycle:
-    enabled: true
-verification:
-  commands:
-    - flutter analyze
-    - flutter test
+  - .perfora-tool/**
 
+suppressions:
+  require_reason: true
+  require_expiry: true
+
+# Suppress by the stable fingerprint emitted in JSON, HTML, and SARIF.
+# Expired suppressions remain visible and no longer bypass the policy gate.
+suppress: []
+#  - fingerprint: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+#    reason: Accepted temporarily while the backend completes its HTTPS migration.
+#    expires: 2026-12-31

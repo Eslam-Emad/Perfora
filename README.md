@@ -13,7 +13,8 @@ deterministic Dart analyzer, enriches confirmed findings with a model selected
 by the user, and can copy a complete finding prompt for handoff to another AI
 agent.
 
-The current `0.1.0` tracer supports OpenCode, Ollama, and OpenAI without silently
+The current `0.2.0` release supports deterministic CLI/CI audits plus OpenCode,
+Ollama, and OpenAI workspace enrichment without silently
 switching providers or models.
 
 ## What works today
@@ -31,10 +32,27 @@ switching providers or models.
   TLS validation, Android cleartext traffic, and global iOS transport exceptions.
 - Evidence, severity, confidence, source location, recommendation, and model
   explanation views.
+- Stable finding fingerprints, versioned analyzer/rule-pack provenance, and
+  structured counts for scanned and skipped files.
+- Persistent finding triage with owner, due date, append-only notes, external
+  ticket, resolution reference, disposition reason, suppression expiration,
+  and status history.
+- Automatic comparison with the previous compatible audit, plus selectable
+  baselines and classifications for new, unchanged, resolved, regressed, and
+  severity-changed findings.
+- Search and filters for severity, triage state, and baseline classification.
+- Deterministic finding verification that re-runs the original rule pack,
+  requires per-file scan proof, persists every attempt, and either certifies
+  resolution, reopens a reproduced finding, or reports an inconclusive result.
+- Deterministic explanations and recommendations remain distinct from optional
+  model enrichment.
 - Server-sent audit progress events and durable audit history in SQLite.
 - Secret-redacted agent handoff prompts containing audit provenance, repository
   state, all finding details, recommendations, context manifest, and current source.
 - JSON, HTML, and SARIF audit exports.
+- A non-interactive `perfora audit` command with repository policy, include/exclude
+  globs, timeouts, Git baselines, new-only gates, stable exit codes, and provider-free
+  JSON, HTML, SARIF, and Markdown CI artifacts.
 
 ## Quick start
 
@@ -101,10 +119,31 @@ curl http://127.0.0.1:8765/api/health
 Expected response:
 
 ```json
-{"name":"Perfora","status":"ready","version":"0.1.0"}
+{"name":"Perfora","status":"ready","version":"0.2.0"}
 ```
 
 Use `Ctrl+C` in both terminals to stop the app.
+
+### Run a provider-free CI audit
+
+The CLI is installed with the API package and never invokes a model provider:
+
+```bash
+perfora audit \
+  --repository . \
+  --type security \
+  --baseline origin/main \
+  --format sarif \
+  --output artifacts/perfora.sarif \
+  --summary artifacts/perfora-summary.md \
+  --fail-on new-high \
+  --deterministic-only
+```
+
+Copy `.perfora.example.yaml` to `.perfora.yaml` to share rule-pack selection,
+path filters, severity gates, and governed suppressions with the repository.
+See [CLI and CI adoption](docs/ci-adoption.md) for exit codes, baseline behavior,
+monorepo selection, and GitHub/GitLab templates.
 
 ### 4. Run the first audit
 
@@ -120,6 +159,8 @@ Use `Ctrl+C` in both terminals to stop the app.
 7. Approve source evidence transmission when the selected model is remote or
    its routing locality is unknown.
 8. Start the audit and inspect the streamed evidence and recommendations.
+9. Compare the result with a prior audit, filter the evidence queue, and record
+   ownership or a triage decision on each finding.
 
 ## Model providers
 
@@ -142,14 +183,51 @@ or model is no longer available.
    in-process `asyncio.Queue` worker.
 3. `DartAnalyzerClient` starts the selected analyzer worker with
    `dart run bin/perfora_analyzer.dart --root <repository> --audit-type <type>`.
-4. The Dart worker either finds owned lifecycle resources without matching cleanup,
-   or inspects security-sensitive Dart code and Android/iOS transport policy.
-5. Confirmed findings are persisted before model generation begins.
-6. The selected provider enriches the first finding with a structured
-   explanation and recommendation. Provider failure leaves a durable partial
-   audit instead of discarding deterministic evidence.
-7. The browser receives progress through
+4. The Dart worker returns versioned findings and structured scan coverage,
+   including why generated, vendor, binary, or unsupported files were skipped.
+5. Confirmed findings receive stable semantic fingerprints and are persisted
+   before model generation begins.
+6. Perfora selects the newest completed or partial audit for the same repository
+   path and audit type, carries active triage metadata by fingerprint, and marks
+   finding changes. Resolved findings that reappear are reopened as regressions.
+7. The selected provider enriches the first finding with a structured
+   explanation and recommendation stored separately from deterministic content.
+   Provider failure leaves a durable partial audit instead of discarding evidence.
+8. The browser receives progress through
    `GET /api/audits/{audit_id}/events` using server-sent events.
+
+## Finding lifecycle and baselines
+
+Findings can be moved through `new`, `investigating`, `in progress`, `resolved`,
+`false positive`, `risk accepted`, and `reopened`. False-positive and
+risk-accepted decisions require a recorded reason; optional suppressions must
+expire in the future. `Verified resolved` is deliberately not a manual choice:
+it is reserved for a deterministic re-scan in the verification phase.
+
+### Deterministic verification
+
+After implementing a change, mark the finding `resolved` and select
+**Verify resolution**. Perfora inspects the current repository and runs the same
+audit-type rule pack without contacting a model. A finding becomes
+`verified resolved` only when:
+
+- its original rule executed;
+- the original source file was included in the per-file scan manifest, or the
+  file no longer exists; and
+- neither the stable fingerprint nor the same rule/file/symbol identity is
+  observed again.
+
+If the source is skipped, the rule does not execute, or an older analyzer does
+not provide per-file coverage, verification is `inconclusive` and triage is not
+changed. If the finding reproduces, it becomes `reopened`. Each attempt records
+the current Git snapshot, analyzer and rule-pack versions, coverage, outcome,
+message, and current evidence.
+
+The default baseline is the newest older completed or partial audit with the
+same exact repository path and audit type. A different eligible baseline can be
+selected in the workspace. Fingerprints—not mutable line numbers—drive the
+comparison. Triage metadata follows unchanged findings; a previously resolved
+or expired suppressed finding is reopened when it appears again.
 
 ### Lifecycle rule pack
 
@@ -177,13 +255,17 @@ lifecycle hooks. Files ending in `.g.dart`, `.freezed.dart`, `.gr.dart`, or
 `.config.dart`, plus `.dart_tool`, `build`, `.git`, and `node_modules`, are
 excluded.
 
+See [the support and coverage matrix](./docs/support-matrix.md) for exact file,
+platform, exclusion, and compatibility boundaries.
+
 ## Agent handoff prompt
 
 Select **Copy prompt** on a finding to copy a complete implementation brief for
 another AI agent. Perfora assembles it locally and does not contact a model. The
 prompt includes the recorded audit and repository provenance, every finding
-field, deterministic evidence and explanation, model explanation when present,
-recommendation, context manifest, and the complete current finding source.
+field, lifecycle status, owner, disposition, notes and history, deterministic
+evidence and recommendation, separately labeled model
+enrichment when present, context manifest, and the complete current finding source.
 Likely secrets are replaced with `[REDACTED]` before the prompt reaches the
 browser. The receiving agent is instructed to confirm the root cause, preserve
 unrelated changes, avoid broad security bypasses, run focused validation, and
@@ -213,10 +295,10 @@ flowchart LR
 
 | Area | Implementation | Responsibility |
 | --- | --- | --- |
-| Web app | React, TypeScript, Vite, Vitest | Setup, saved project picker, model picker, audit workspace, prompt copying, and exports |
-| API | Python, FastAPI, Pydantic, HTTPX | Routes, provider catalogs, audit orchestration, SSE, exports, and handoff prompt assembly |
-| Analyzer | Dart analyzer package | AST parsing, framework classification, resource ownership, cleanup detection, and JSON findings |
-| Persistence | Python `sqlite3` | Stores each complete `AuditRecord` as JSON in the `audits` table |
+| Web app | React, TypeScript, Vite, Vitest | Setup, saved project picker, model picker, comparison and triage workspace, prompt copying, and exports |
+| API | Python, FastAPI, Pydantic, HTTPX | Routes, provider catalogs, audit orchestration, stable finding identity, lifecycle, baselines, SSE, exports, and handoff prompt assembly |
+| Analyzer | Dart analyzer package | Versioned AST rule packs, framework classification, evidence, and per-file structured scan coverage for verification |
+| Persistence | Python `sqlite3` | Applies ordered schema migrations and stores versioned `AuditRecord` JSON |
 | Providers | Adapter registry | Normalizes model discovery and schema-constrained generation across three provider types |
 | Local process runner | Python `asyncio` subprocesses | Runs Git, Dart, OpenCode, and the macOS folder picker with bounded timeouts |
 

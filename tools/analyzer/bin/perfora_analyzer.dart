@@ -7,6 +7,8 @@ import 'package:perfora_analyzer/perfora_analyzer.dart';
 Future<void> main(List<String> arguments) async {
   final parser = ArgParser()
     ..addOption('root', mandatory: true)
+    ..addMultiOption('include')
+    ..addMultiOption('exclude')
     ..addOption(
       'audit-type',
       allowed: const ['performance', 'security'],
@@ -20,10 +22,20 @@ Future<void> main(List<String> arguments) async {
     return;
   }
 
-  final findings = switch (options.option('audit-type')) {
-    'security' => await SecurityAnalyzer().analyze(root),
-    _ => await LifecycleAnalyzer().analyze(root),
+  final includePaths = options.multiOption('include');
+  final excludePaths = options.multiOption('exclude');
+
+  final report = switch (options.option('audit-type')) {
+    'security' => await SecurityAnalyzer().analyze(
+        root,
+        includePaths: includePaths,
+        excludePaths: excludePaths,
+      ),
+    _ => await LifecycleAnalyzer().analyze(
+        root,
+        includePaths: includePaths,
+        excludePaths: excludePaths,
+      ),
   };
-  stdout
-      .write(jsonEncode(findings.map((finding) => finding.toJson()).toList()));
+  stdout.write(jsonEncode(report.toJson()));
 }

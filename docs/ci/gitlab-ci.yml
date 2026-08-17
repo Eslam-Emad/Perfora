@@ -1,0 +1,39 @@
+stages:
+  - test
+
+variables:
+  PERFORA_REF: main # Pin to a reviewed tag or full commit SHA in production.
+  PERFORA_REPOSITORY: .
+  GIT_DEPTH: "0"
+
+perfora-audit:
+  stage: test
+  before_script:
+    - git clone --depth 1 --branch "$PERFORA_REF" https://github.com/Eslam-Emad/Perfora.git .perfora-tool
+    - python3 -m pip install -e ./.perfora-tool/apps/api
+    - (cd .perfora-tool/tools/analyzer && dart pub get)
+  script:
+    - mkdir -p artifacts
+    - |
+      if [ -n "$CI_MERGE_REQUEST_DIFF_BASE_SHA" ]; then
+        BASELINE_REF="$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+      else
+        BASELINE_REF="origin/$CI_DEFAULT_BRANCH"
+      fi
+      perfora audit \
+        --repository "$PERFORA_REPOSITORY" \
+        --baseline "$BASELINE_REF" \
+        --format sarif \
+        --output artifacts/perfora.sarif \
+        --summary artifacts/perfora-summary.md \
+        --exclude ".perfora-tool/**" \
+        --fail-on new-high \
+        --deterministic-only
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - artifacts/perfora.sarif
+      - artifacts/perfora-summary.md
+    reports:
+      sarif: artifacts/perfora.sarif

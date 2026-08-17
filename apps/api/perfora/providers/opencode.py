@@ -64,23 +64,6 @@ def _decode_json_object(text: str) -> dict[str, Any]:
     raise ProviderStructuredOutputError("OpenCode returned no valid JSON object")
 
 
-def _extract_unified_diff(text: str) -> str | None:
-    lines = text.splitlines()
-    start = next(
-        (index for index, line in enumerate(lines) if line.startswith("diff --git ")), None
-    )
-    if start is None:
-        return None
-    patch_lines: list[str] = []
-    for line in lines[start:]:
-        if line.startswith("```") or line.rstrip() == '"}':
-            break
-        if patch_lines and not line.startswith((" ", "+", "-", "\\", "@", "index ", "diff ")):
-            break
-        patch_lines.append(line)
-    return "\n".join(patch_lines).strip() or None
-
-
 class OpenCodeAdapter(ProviderAdapter):
     id = ProviderId.OPENCODE
     locality = "unknown"
@@ -164,16 +147,4 @@ class OpenCodeAdapter(ProviderAdapter):
             input_text=schema_prompt,
         )
         text = _text_from_json_events(output)
-        try:
-            return _decode_json_object(text)
-        except ProviderStructuredOutputError:
-            if "patch_lines" not in schema.get("properties", {}):
-                raise
-            patch = _extract_unified_diff(text)
-            if not patch:
-                raise
-            return {
-                "summary": "OpenCode generated a patch for review",
-                "risk": "Review the exact diff before applying",
-                "patch_lines": patch.splitlines(),
-            }
+        return _decode_json_object(text)

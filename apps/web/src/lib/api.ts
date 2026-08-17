@@ -1,11 +1,15 @@
 import type {
   AuditRecord,
+  AuditComparison,
   AuditType,
   AgentPrompt,
+  Finding,
+  FindingUpdate,
   ProviderCatalog,
   ProviderId,
   RepositorySnapshot,
   SetupStatus,
+  VerificationAttempt,
 } from "../types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -58,4 +62,18 @@ export const api = {
     request<AgentPrompt>(`/api/audits/${auditId}/findings/${findingId}/prompt`, {
       method: "POST",
     }),
+  updateFinding: (auditId: string, findingId: string, input: FindingUpdate) =>
+    request<Finding>(`/api/audits/${auditId}/findings/${findingId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  compareAudit: (auditId: string, baselineId?: string) => {
+    const query = baselineId ? `?baseline_id=${encodeURIComponent(baselineId)}` : "";
+    return request<AuditComparison>(`/api/audits/${auditId}/comparison${query}`);
+  },
+  verifyFinding: (auditId: string, findingId: string) =>
+    request<VerificationAttempt>(
+      `/api/audits/${auditId}/findings/${findingId}/verify`,
+      { method: "POST" },
+    ),
 };

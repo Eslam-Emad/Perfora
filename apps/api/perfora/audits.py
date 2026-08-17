@@ -6,14 +6,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .analyzer_client import AnalyzerUnavailable, DartAnalyzerClient
+from .comparisons import AuditComparisonService
 from .database import AuditStore
 from .domain import (
     AuditCreate,
     AuditEvent,
     AuditRecord,
     Finding,
+    ModelEnrichment,
     RepositorySnapshot,
 )
+from .fingerprints import finding_fingerprint, fingerprint_basis
 from .providers import ProviderRegistry
 from .security import redact_secrets
 
@@ -38,6 +41,7 @@ class AuditCoordinator:
         self.store = store
         self.analyzer = analyzer
         self.providers = providers
+        self.comparisons = AuditComparisonService(store)
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._conditions: dict[str, asyncio.Condition] = {}
@@ -113,9 +117,7 @@ class AuditCoordinator:
         self._append_event(audit, "started", "Inspecting repository evidence", 10)
         await self._persist_and_notify(audit)
         try:
-            raw_findings = await self.analyzer.analyze(
-                Path(audit.repository.path), audit.audit_type
-            )
+            analysis = await self.analyzer.analyze(Path(audit.repository.path), audit.audit_type)
         except AnalyzerUnavailable as error:
             audit.status = "failed"
             audit.error = str(error)
@@ -123,19 +125,36 @@ class AuditCoordinator:
             await self._persist_and_notify(audit)
             return
 
-        for raw in raw_findings:
+        audit.analyzer_version = analysis.analyzer_version
+        audit.rule_pack = analysis.rule_pack
+        audit.scan_coverage = analysis.coverage
+        fingerprint_occurrences: dict[str, int] = {}
+        for raw in analysis.findings:
+            fingerprint_basis = self._fingerprint_basis(raw)
+            occurrence = fingerprint_occurrences.get(fingerprint_basis, 0)
+            fingerprint_occurrences[fingerprint_basis] = occurrence + 1
             finding = Finding(
                 id=uuid.uuid4().hex,
                 audit_id=audit.id,
+                fingerprint=self._fingerprint(fingerprint_basis, occurrence),
                 **raw,
             )
             audit.findings.append(finding)
+        comparison = self.comparisons.apply_baseline(audit)
         self._append_event(
             audit,
             "evidence_ready",
             f"Found {len(audit.findings)} {audit.audit_type.value} issue(s)",
             55,
-            {"finding_count": len(audit.findings)},
+            {
+                "finding_count": len(audit.findings),
+                "files_scanned": audit.scan_coverage.files_scanned,
+                "files_skipped": audit.scan_coverage.files_skipped,
+                "baseline_audit_id": comparison.baseline_audit_id,
+                "new_findings": len(comparison.new_finding_ids),
+                "regressed_findings": len(comparison.regressed_finding_ids),
+                "resolved_findings": len(comparison.resolved_findings),
+            },
         )
         await self._persist_and_notify(audit)
 
@@ -164,8 +183,12 @@ class AuditCoordinator:
             enrichment = await self.providers.generate_json(
                 audit.provider, audit.model_id, prompt, ENRICHMENT_SCHEMA
             )
-            first.model_explanation = enrichment["explanation"]
-            first.recommendation = enrichment["recommendation"]
+            first.model_enrichment = ModelEnrichment(
+                provider=audit.provider,
+                model_id=audit.model_id,
+                explanation=enrichment["explanation"],
+                recommendation=enrichment["recommendation"],
+            )
             audit.status = "completed"
             self._append_event(audit, "completed", "Audit completed", 100)
         # This is the job-runner boundary: every provider failure must become a
@@ -196,6 +219,14 @@ Evidence:
 
 Return a concise causal explanation and one specific, safe recommendation."""
         )
+
+    @staticmethod
+    def _fingerprint_basis(raw: dict) -> str:
+        return fingerprint_basis(raw)
+
+    @staticmethod
+    def _fingerprint(basis: str, occurrence: int = 0) -> str:
+        return finding_fingerprint(basis, occurrence)
 
     def _append_event(
         self,
