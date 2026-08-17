@@ -15,6 +15,7 @@ from .database import AuditStore
 from .domain import AuditCreate, FixApplyRequest, RepositoryRequest
 from .exports import export_html, export_json, export_sarif
 from .fixes import FixSafetyError, FixService
+from .prompts import PromptBuildError, PromptService
 from .providers import ProviderRegistry, ProviderRequestError
 from .repositories import (
     RepositoryPickerCancelled,
@@ -28,6 +29,7 @@ store = AuditStore(settings.database_path)
 providers = ProviderRegistry(settings)
 coordinator = AuditCoordinator(store, DartAnalyzerClient(settings), providers)
 fixes = FixService(store, providers)
+prompts = PromptService(store)
 
 
 @asynccontextmanager
@@ -170,6 +172,16 @@ async def propose_fix(audit_id: str, finding_id: str):
         raise HTTPException(status_code=409, detail=str(error)) from None
     except ProviderRequestError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
+
+
+@app.post("/api/audits/{audit_id}/findings/{finding_id}/prompt")
+async def build_agent_prompt(audit_id: str, finding_id: str):
+    try:
+        return prompts.build(audit_id, finding_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Audit or finding not found") from None
+    except PromptBuildError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
 
 
 @app.post("/api/audits/{audit_id}/findings/{finding_id}/apply")

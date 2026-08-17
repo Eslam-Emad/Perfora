@@ -1,12 +1,38 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from typing import Any
 
 from ..domain import ModelInfo, ProviderCatalog, ProviderId
 from ..process import ProcessError, run_process
 from .base import ProviderAdapter, ProviderStructuredOutputError
+
+_GENERATION_AGENT = "perfora-json"
+
+
+def _generation_environment() -> dict[str, str]:
+    inline_config: dict[str, Any] = {}
+    configured = os.getenv("OPENCODE_CONFIG_CONTENT")
+    if configured:
+        try:
+            candidate = json.loads(configured)
+            if isinstance(candidate, dict):
+                inline_config = candidate
+        except json.JSONDecodeError:
+            pass
+    agents = inline_config.setdefault("agent", {})
+    if not isinstance(agents, dict):
+        agents = {}
+        inline_config["agent"] = agents
+    agents[_GENERATION_AGENT] = {
+        "description": "Single-step structured output for Perfora",
+        "mode": "primary",
+        "steps": 1,
+        "permission": {"*": "deny"},
+    }
+    return {"OPENCODE_CONFIG_CONTENT": json.dumps(inline_config, separators=(",", ":"))}
 
 
 def _text_from_json_events(output: str) -> str:
@@ -129,10 +155,13 @@ class OpenCodeAdapter(ProviderAdapter):
                 model_id,
                 "--format",
                 "json",
+                "--agent",
+                _GENERATION_AGENT,
                 "--pure",
-                schema_prompt,
             ],
             timeout=180,
+            env=_generation_environment(),
+            input_text=schema_prompt,
         )
         text = _text_from_json_events(output)
         try:

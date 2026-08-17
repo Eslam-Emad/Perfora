@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -19,11 +20,14 @@ from perfora.exports import export_html, export_sarif
 from perfora.fixes import FIX_SCHEMA, FixSafetyError, FixService
 from perfora.main import app
 from perfora.process import run_process
+from perfora.prompts import PromptService
 from perfora.providers import ProviderRegistry
 from perfora.providers.base import ProviderStructuredOutputError
 from perfora.providers.opencode import (
+    OpenCodeAdapter,
     _decode_json_object,
     _extract_unified_diff,
+    _generation_environment,
     _text_from_json_events,
 )
 from perfora.repositories import inspect_repository, pick_repository_path
@@ -157,6 +161,41 @@ def test_rejects_opencode_output_without_a_json_object() -> None:
         _decode_json_object("I could not generate the requested patch.")
 
 
+def test_opencode_generation_agent_denies_tools_and_limits_steps(monkeypatch) -> None:
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+
+    config = json.loads(_generation_environment()["OPENCODE_CONFIG_CONTENT"])
+    agent = config["agent"]["perfora-json"]
+
+    assert agent["mode"] == "primary"
+    assert agent["steps"] == 1
+    assert agent["permission"] == {"*": "deny"}
+
+
+@pytest.mark.asyncio
+async def test_opencode_sends_generation_prompt_over_stdin(monkeypatch) -> None:
+    observed: dict = {}
+
+    async def generate(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return '{"type":"text","part":{"type":"text","text":"{\\"summary\\":\\"ok\\"}"}}'
+
+    monkeypatch.setattr("perfora.providers.opencode.shutil.which", lambda _: "/bin/opencode")
+    monkeypatch.setattr("perfora.providers.opencode.run_process", generate)
+
+    result = await OpenCodeAdapter().generate_json(
+        "opencode/big-pickle",
+        "sensitive source prompt",
+        {"type": "object", "properties": {"summary": {"type": "string"}}},
+    )
+
+    assert result == {"summary": "ok"}
+    assert "sensitive source prompt" not in observed["command"]
+    assert "sensitive source prompt" in observed["input_text"]
+    assert observed["command"][-3:] == ["--agent", "perfora-json", "--pure"]
+
+
 def test_fix_schema_uses_patch_lines_instead_of_a_multiline_json_string() -> None:
     assert "patch_lines" in FIX_SCHEMA["properties"]
     assert "patch" not in FIX_SCHEMA["properties"]
@@ -236,6 +275,44 @@ def test_rejects_patch_outside_approved_file(tmp_path: Path) -> None:
 
     with pytest.raises(FixSafetyError, match="outside the approved finding"):
         service._validate_patch(tmp_path, patch, allowed_file="lib/controller.dart")
+
+
+def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
+    source = tmp_path / "lib" / "controller.dart"
+    source.parent.mkdir()
+    source.write_text('const apiKey = "sk-example012345678901234567890";\nclass Controller {}\n')
+    settings = Settings(database_path=tmp_path.parent / f"{tmp_path.name}.db")
+    store = AuditStore(settings.database_path)
+    audit = _audit(tmp_path)
+    audit.audit_type = AuditType.SECURITY
+    audit.repository.branch = "feature/security"
+    audit.repository.commit_sha = "abc123"
+    audit.repository.clean = False
+    audit.repository.fingerprint = "fingerprint-1"
+    audit.repository.packages = [".", "packages/shared"]
+    audit.context_manifest = ["lib/controller.dart", "pubspec.yaml"]
+    audit.findings[0].model_explanation = "The model confirmed the ownership gap."
+    store.save(audit)
+
+    result = PromptService(store).build(audit.id, audit.findings[0].id)
+
+    assert result.redacted is True
+    assert result.finding_id == "finding-1"
+    assert "Audit type: security" in result.prompt
+    assert "Selected provider/model: ollama/qwen" in result.prompt
+    assert "Branch: feature/security" in result.prompt
+    assert "Commit: abc123" in result.prompt
+    assert "Clean at audit time: false" in result.prompt
+    assert "Rule ID: lifecycle.missing_cleanup" in result.prompt
+    assert "Controller is created by the class." in result.prompt
+    assert "The controller outlives its owner." in result.prompt
+    assert "The model confirmed the ownership gap." in result.prompt
+    assert "Dispose the controller." in result.prompt
+    assert "packages/shared" in result.prompt
+    assert "class Controller {}" in result.prompt
+    assert "[REDACTED]" in result.prompt
+    assert "sk-example" not in result.prompt
+    assert "Do not commit, push" in result.prompt
 
 
 @pytest.mark.asyncio

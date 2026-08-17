@@ -10,7 +10,8 @@
 
 Perfora is a local-first web workspace that inspects a Flutter repository with a
 deterministic Dart analyzer, enriches confirmed findings with a model selected
-by the user, and can generate a reviewed Git patch for one finding.
+by the user, and can copy a complete finding prompt for handoff to another AI
+agent.
 
 The current `0.1.0` tracer supports OpenCode, Ollama, and OpenAI without silently
 switching providers or models.
@@ -31,9 +32,9 @@ switching providers or models.
 - Evidence, severity, confidence, source location, recommendation, and model
   explanation views.
 - Server-sent audit progress events and durable audit history in SQLite.
-- Reviewed single-file patch generation, clean-worktree checks, a dedicated Git
-  branch, verification, and session-bound rollback.
-- JSON, HTML, SARIF, and patch downloads.
+- Secret-redacted agent handoff prompts containing audit provenance, repository
+  state, all finding details, recommendations, context manifest, and current source.
+- JSON, HTML, and SARIF audit exports.
 
 ## Quick start
 
@@ -176,24 +177,17 @@ lifecycle hooks. Files ending in `.g.dart`, `.freezed.dart`, `.gr.dart`, or
 `.config.dart`, plus `.dart_tool`, `build`, `.git`, and `node_modules`, are
 excluded.
 
-## Apply Fix safety flow
+## Agent handoff prompt
 
-Apply Fix is intentionally constrained:
-
-1. The selected model receives the confirmed finding and its source file after
-   likely secrets are redacted.
-2. The response must contain one unified Git patch for exactly the finding's
-   file.
-3. Perfora checks the patch with `git apply --check`.
-4. Application requires explicit approval, an unchanged `HEAD`, and a clean
-   Git worktree.
-5. Perfora creates `perfora/fix-<finding-id>` and applies the patch.
-6. Verification can run only `dart analyze`, `flutter analyze`, or
-   `flutter test`.
-7. The generated patch can be downloaded. An applied patch can be rolled back
-   while the same API process is running.
-
-Perfora does not commit or push changes in the analyzed repository.
+Select **Copy prompt** on a finding to copy a complete implementation brief for
+another AI agent. Perfora assembles it locally and does not contact a model. The
+prompt includes the recorded audit and repository provenance, every finding
+field, deterministic evidence and explanation, model explanation when present,
+recommendation, context manifest, and the complete current finding source.
+Likely secrets are replaced with `[REDACTED]` before the prompt reaches the
+browser. The receiving agent is instructed to confirm the root cause, preserve
+unrelated changes, avoid broad security bypasses, run focused validation, and
+report its changes and remaining risk.
 
 ## Architecture
 
@@ -211,24 +205,23 @@ flowchart LR
     Providers --> Ollama["Ollama HTTP API"]
     Providers --> OpenAI["OpenAI Responses API"]
 
-    API --> Fixes["FixService"]
-    Fixes --> GitRepo["Selected local Git repository"]
+    API --> Prompt["PromptService"]
+    Prompt --> GitRepo["Selected local Git repository"]
 ```
 
 ## Implementation details
 
 | Area | Implementation | Responsibility |
 | --- | --- | --- |
-| Web app | React, TypeScript, Vite, Vitest | Setup, saved project picker, model picker, audit workspace, patch review, and exports |
-| API | Python, FastAPI, Pydantic, HTTPX | Routes, provider catalogs, audit orchestration, SSE, exports, and fix safety |
+| Web app | React, TypeScript, Vite, Vitest | Setup, saved project picker, model picker, audit workspace, prompt copying, and exports |
+| API | Python, FastAPI, Pydantic, HTTPX | Routes, provider catalogs, audit orchestration, SSE, exports, and handoff prompt assembly |
 | Analyzer | Dart analyzer package | AST parsing, framework classification, resource ownership, cleanup detection, and JSON findings |
 | Persistence | Python `sqlite3` | Stores each complete `AuditRecord` as JSON in the `audits` table |
 | Providers | Adapter registry | Normalizes model discovery and schema-constrained generation across three provider types |
 | Local process runner | Python `asyncio` subprocesses | Runs Git, Dart, OpenCode, and the macOS folder picker with bounded timeouts |
 
 The React app stores validated project snapshots in browser `localStorage`.
-Audit records and events are stored in `perfora.db` by default. Generated
-rollback patches stay in API process memory and are not durable across restarts.
+Audit records and events are stored in `perfora.db` by default.
 
 ## Configuration
 
@@ -293,12 +286,12 @@ Confirm `dart` is on `PATH`, then install the worker dependencies:
 
 Use **Refresh health** or **Test connections** after correcting a provider.
 
-### Apply Fix is rejected
+### Copy prompt fails
 
-The target must be a Git repository with a clean worktree, its `HEAD` must still
-match the revision recorded when the patch was generated, and the patch must
-apply cleanly. Commit or stash unrelated target-repository changes, then
-generate a new patch.
+Confirm that the finding's source file still exists under the recorded
+repository path and is readable. Perfora refuses paths outside that repository
+and source files larger than 1,000,000 characters. Browser clipboard permission
+must also be available.
 
 ## Current limitations
 
@@ -309,7 +302,6 @@ generate a new patch.
 - The audit queue is in-process and handles one audit at a time.
 - Native folder browsing is macOS-only; manual absolute paths are available on
   other platforms but are not certified.
-- Rollback data is process-local and is lost when the API restarts.
 - Model capability filtering is heuristic.
 - Single local user; no authentication, collaboration, hosted deployment, or
   automatic telemetry.

@@ -19,16 +19,19 @@ async def run_process(
     cwd: Path | None = None,
     timeout: float = 30,
     env: dict[str, str] | None = None,
+    input_text: str | None = None,
 ) -> str:
     process = await asyncio.create_subprocess_exec(
         *command,
         cwd=cwd,
         env={**os.environ, **(env or {})},
+        stdin=asyncio.subprocess.PIPE if input_text is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        input_bytes = input_text.encode() if input_text is not None else None
+        stdout, _ = await asyncio.wait_for(process.communicate(input_bytes), timeout=timeout)
     except TimeoutError:
         process.kill()
         await process.wait()

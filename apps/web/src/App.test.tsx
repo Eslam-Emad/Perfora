@@ -161,6 +161,74 @@ describe("Perfora shell", () => {
     expect(createdBody?.audit_type).toBe("security");
   });
 
+  it("copies a complete redacted finding prompt without generating a fix", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const audit = {
+      id: "security-audit",
+      repository: flutterProject,
+      provider: "ollama",
+      model_id: "qwen2.5-coder:7b",
+      audit_type: "security",
+      model_metadata: {},
+      status: "completed",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      findings: [{
+        id: "finding-1",
+        audit_id: "security-audit",
+        rule_id: "network.cleartext_endpoint",
+        title: "Cleartext HTTP endpoint is embedded in source",
+        severity: "high",
+        confidence: 0.98,
+        status: "confirmed",
+        file: "lib/config.dart",
+        line: 12,
+        symbol: "baseUrl",
+        framework: "Dart",
+        evidence: ["A cleartext endpoint was found."],
+        explanation: "Traffic may be intercepted.",
+        recommendation: "Use HTTPS.",
+        fix_status: "not_requested",
+      }],
+      events: [{
+        sequence: 1,
+        type: "completed",
+        message: "Audit completed",
+        progress: 100,
+        created_at: new Date().toISOString(),
+      }],
+      context_manifest: ["lib/config.dart"],
+    };
+    const handoffPrompt = "# Resolve this Perfora finding\nAll finding details";
+    vi.mocked(fetch).mockImplementation((input) => {
+      const requestPath = String(input);
+      if (requestPath.endsWith("/api/setup")) return jsonResponse(setup);
+      if (requestPath.endsWith("/prompt")) {
+        return jsonResponse({
+          audit_id: audit.id,
+          finding_id: audit.findings[0].id,
+          prompt: handoffPrompt,
+          redacted: true,
+          generated_at: new Date().toISOString(),
+        });
+      }
+      return jsonResponse({ audits: [audit] });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Repositories" }));
+    fireEvent.click(await screen.findByRole("button", { name: /sample_flutter Application security/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(handoffPrompt));
+    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+    expect(screen.queryByText("Generate fix")).not.toBeInTheDocument();
+  });
+
   it("revalidates a saved project and keeps its error beside that control", async () => {
     window.localStorage.setItem(
       "perfora.projects",

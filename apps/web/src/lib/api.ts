@@ -1,7 +1,7 @@
 import type {
   AuditRecord,
   AuditType,
-  FixProposal,
+  AgentPrompt,
   ProviderCatalog,
   ProviderId,
   RepositorySnapshot,
@@ -54,27 +54,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  proposeFix: (auditId: string, findingId: string) =>
-    request<FixProposal>(`/api/audits/${auditId}/findings/${findingId}/fix`, {
-      method: "POST",
-    }),
-  applyFix: (
-    auditId: string,
-    findingId: string,
-    proposal: FixProposal,
-    verificationCommands: string[],
-  ) =>
-    request(`/api/audits/${auditId}/findings/${findingId}/apply`, {
-      method: "POST",
-      body: JSON.stringify({
-        approved: true,
-        expected_head: proposal.expected_head,
-        patch: proposal.patch,
-        verification_commands: verificationCommands,
-      }),
-    }),
-  rollbackFix: (auditId: string, findingId: string) =>
-    request(`/api/audits/${auditId}/findings/${findingId}/rollback`, {
+  buildAgentPrompt: (auditId: string, findingId: string) =>
+    request<AgentPrompt>(`/api/audits/${auditId}/findings/${findingId}/prompt`, {
       method: "POST",
     }),
 };

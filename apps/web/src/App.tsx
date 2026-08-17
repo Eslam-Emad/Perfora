@@ -9,6 +9,7 @@ import {
   CircleCheck,
   Clock3,
   Code2,
+  Copy,
   Download,
   FileCode2,
   FolderOpen,
@@ -23,7 +24,6 @@ import {
   Play,
   Plus,
   RefreshCw,
-  RotateCcw,
   SearchCode,
   Settings,
   ShieldCheck,
@@ -39,7 +39,6 @@ import type {
   AuditRecord,
   AuditType,
   Finding,
-  FixProposal,
   ModelInfo,
   ProviderCatalog,
   ProviderId,
@@ -853,40 +852,43 @@ function AuditWorkspace({ audit, onRefresh, onNewAudit }: { audit: AuditRecord |
           {audit.findings.length === 0 ? <div className="panel-empty"><LoaderCircle className={audit.status === "running" ? "spin" : ""} /><strong>{audit.status === "running" ? `Analyzing ${auditType} evidence` : `No ${auditType} findings`}</strong></div> : audit.findings.map((finding) => <button key={finding.id} className={selected?.id === finding.id ? "finding-row selected" : "finding-row"} onClick={() => setSelectedId(finding.id)}><span className={`severity-mark ${finding.severity}`} /><div><span className="finding-framework">{finding.framework}</span><strong>{finding.title}</strong><small>{finding.file}:{finding.line}</small></div><span className="confidence">{Math.round(finding.confidence * 100)}%</span></button>)}
         </aside>
         <div className="detail-panel">
-          {selected ? <FindingDetail finding={selected} audit={audit} onRefresh={onRefresh} /> : <EmptyState icon={SearchCode} title="Waiting for evidence" description={auditType === "security" ? "The deterministic analyzer is inspecting application security controls." : "The deterministic analyzer is inspecting lifecycle ownership."} />}
+          {selected ? <FindingDetail finding={selected} audit={audit} /> : <EmptyState icon={SearchCode} title="Waiting for evidence" description={auditType === "security" ? "The deterministic analyzer is inspecting application security controls." : "The deterministic analyzer is inspecting lifecycle ownership."} />}
         </div>
       </div>
     </section>
   );
 }
 
-function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit: AuditRecord; onRefresh: () => void }) {
-  const [proposal, setProposal] = useState<FixProposal | null>(null);
+function FindingDetail({ finding, audit }: { finding: Finding; audit: AuditRecord }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [applied, setApplied] = useState(false);
-  const propose = async () => {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    setCopied(false);
+    setError("");
+  }, [finding.id]);
+  const copyPrompt = async () => {
     setLoading(true); setError("");
-    try { setProposal(await api.proposeFix(audit.id, finding.id)); } catch (reason) { setError(reason instanceof Error ? reason.message : "Fix generation failed"); } finally { setLoading(false); }
-  };
-  const apply = async () => {
-    if (!proposal) return;
-    setLoading(true); setError("");
-    try { await api.applyFix(audit.id, finding.id, proposal, ["flutter analyze"]); setApplied(true); onRefresh(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Fix application failed"); } finally { setLoading(false); }
-  };
-  const rollback = async () => {
-    setLoading(true); setError("");
-    try { await api.rollbackFix(audit.id, finding.id); setApplied(false); onRefresh(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Rollback failed"); } finally { setLoading(false); }
+    try {
+      const result = await api.buildAgentPrompt(audit.id, finding.id);
+      await writeClipboard(result.prompt);
+      setCopied(true);
+    } catch (reason) {
+      setCopied(false);
+      setError(reason instanceof Error ? reason.message : "Prompt copy failed");
+    } finally {
+      setLoading(false);
+    }
   };
   return (
     <>
-      <div className="detail-heading"><div><div className="finding-tags"><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><span className="confirmed-pill"><ShieldCheck size={13} /> {finding.status}</span><span>{finding.framework}</span></div><h2>{finding.title}</h2><code>{finding.file}:{finding.line} · {finding.symbol}</code></div><button className="button primary" onClick={propose} disabled={loading || audit.status === "partial"}>{loading ? <LoaderCircle className="spin" /> : <Wrench />} Generate fix</button></div>
+      <div className="detail-heading"><div><div className="finding-tags"><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><span className="confirmed-pill"><ShieldCheck size={13} /> {finding.status}</span><span>{finding.framework}</span></div><h2>{finding.title}</h2><code>{finding.file}:{finding.line} · {finding.symbol}</code></div><button className="button primary" onClick={copyPrompt} disabled={loading}>{loading ? <LoaderCircle className="spin" /> : copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy prompt"}</button></div>
       <div className="detail-section"><p className="eyebrow">Causal explanation</p><p className="lead-copy">{finding.model_explanation || finding.explanation}</p></div>
       <div className="detail-section"><p className="eyebrow">Deterministic evidence</p><div className="evidence-list">{finding.evidence.map((evidenceLine) => <div key={evidenceLine}><CircleCheck size={16} /><span>{evidenceLine}</span></div>)}</div></div>
       <div className="detail-section recommendation"><div className="recommendation-icon"><Sparkles size={19} /></div><div><p className="eyebrow">Recommended change</p><p>{finding.recommendation}</p></div></div>
       <div className="context-manifest"><LockKeyhole size={16} /><span><strong>Context manifest:</strong> only {audit.context_manifest.length ? audit.context_manifest.join(", ") : "deterministic evidence"} was selected for model enrichment.</span></div>
-      {error && <Notice tone="danger" title="Apply Fix">{error}</Notice>}
-      {proposal && <div className="fix-review"><div className="fix-review-heading"><div><p className="eyebrow">Reviewed patch required</p><h3>{proposal.summary}</h3><span>Risk: {proposal.risk}</span></div><button className="icon-button" onClick={() => setProposal(null)}><X size={17} /></button></div><pre>{proposal.patch}</pre><div className="fix-actions"><span><GitBranch size={15} /> Will create perfora/fix-{finding.id.slice(0, 8)}</span><div className="fix-action-buttons"><button className="button secondary" onClick={() => downloadPatch(proposal, finding.file)}><Download size={16} /> Download patch</button>{applied ? <button className="button secondary danger" onClick={rollback} disabled={loading}><RotateCcw size={16} /> Roll back</button> : <button className="button primary" onClick={apply} disabled={loading}><ShieldCheck size={16} /> Approve & apply</button>}</div></div></div>}
+      <div className="context-manifest"><Copy size={16} /><span><strong>Agent handoff:</strong> Copy prompt assembles the audit provenance, all finding evidence and recommendations, repository state, and the complete secret-redacted source file. It does not contact a model or modify the repository.</span></div>
+      {error && <Notice tone="danger" title="Copy prompt">{error}</Notice>}
     </>
   );
 }
@@ -941,17 +943,21 @@ function ExportMenu({ audit }: { audit: AuditRecord }) {
   return <div className="export-group"><Download size={16} />{(["html", "json", "sarif"] as const).map((format) => <a key={format} href={`/api/audits/${audit.id}/export?format=${format}`} download>{format.toUpperCase()}</a>)}</div>;
 }
 
-function downloadPatch(proposal: FixProposal, findingFile: string) {
-  const patchBlob = new Blob([proposal.patch], { type: "text/x-patch" });
-  const patchUrl = URL.createObjectURL(patchBlob);
-  const patchLink = document.createElement("a");
-  const sourceName = findingFile.split("/").at(-1)?.replace(/\.dart$/, "") ?? "perfora-fix";
-  patchLink.href = patchUrl;
-  patchLink.download = `${sourceName}-${proposal.finding_id.slice(0, 8)}.patch`;
-  document.body.append(patchLink);
-  patchLink.click();
-  patchLink.remove();
-  window.setTimeout(() => URL.revokeObjectURL(patchUrl), 0);
+async function writeClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textArea = document.createElement("textarea");
+  textArea.value = value;
+  textArea.setAttribute("readonly", "");
+  textArea.style.position = "fixed";
+  textArea.style.opacity = "0";
+  document.body.append(textArea);
+  textArea.select();
+  const copied = document.execCommand("copy");
+  textArea.remove();
+  if (!copied) throw new Error("Clipboard access is unavailable in this browser");
 }
 
 export default App;

@@ -5,6 +5,7 @@ from typing import Any
 
 from ..config import Settings
 from ..domain import ProviderCatalog, ProviderId
+from ..process import ProcessError
 from .base import ProviderAdapter, ProviderRequestError, ProviderStructuredOutputError
 from .ollama import OllamaAdapter
 from .openai import OpenAIAdapter
@@ -40,6 +41,13 @@ class ProviderRegistry:
         except ProviderStructuredOutputError as error:
             raise ProviderRequestError(
                 f"{provider.value}/{model_id} returned invalid structured output"
+            ) from error
+        except ProcessError as error:
+            detail = (
+                "timed out" if error.returncode == -1 else f"CLI exited with {error.returncode}"
+            )
+            raise ProviderRequestError(
+                f"{provider.value}/{model_id} generation failed: {detail}"
             ) from error
         # Provider libraries and local CLIs expose different exception trees.
         # Normalize them here so API routes never leak raw response bodies.

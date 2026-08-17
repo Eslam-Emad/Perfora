@@ -126,6 +126,14 @@ class AuditRecord(BaseModel):
     context_manifest: list[str] = Field(default_factory=list)
 
 
+class AgentPrompt(BaseModel):
+    finding_id: str
+    audit_id: str
+    prompt: str
+    redacted: bool = True
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
 class FixProposal(BaseModel):
     finding_id: str
     audit_id: str

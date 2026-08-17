@@ -90,11 +90,10 @@ export interface AuditRecord {
   context_manifest: string[];
 }
 
-export interface FixProposal {
+export interface AgentPrompt {
   finding_id: string;
   audit_id: string;
-  summary: string;
-  risk: string;
-  patch: string;
-  expected_head: string;
+  prompt: string;
+  redacted: boolean;
+  generated_at: string;
 }

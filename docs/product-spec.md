@@ -3,8 +3,8 @@
 ## Promise
 
 Given a local Flutter repository and one explicitly selected model, Perfora
-produces an evidence-backed static performance or security audit and can apply
-one reviewed, recoverable fix.
+produces an evidence-backed static performance or security audit and can copy
+one complete, secret-redacted finding brief for another AI agent.
 
 ## Fixed decisions
 
@@ -27,13 +27,11 @@ one reviewed, recoverable fix.
   Transport Security exceptions. Secret values never enter finding evidence.
 - No unsupported overall performance score. The UI reports evidence, severity,
   confidence, coverage, and verification state.
-- Apply Fix is per-finding: generate, preview, approve, checkpoint, apply,
-  verify, rerun, compare, and rollback. It requires a clean Git worktree and
-  creates a `perfora/fix-<finding-id>` branch.
-- Verification is limited to `dart analyze`, `flutter analyze`, `flutter test`,
-  existing Melos scripts, and explicitly approved project commands.
-- One active local job at a time; repository fixes obtain an exclusive lock.
-- Exports: HTML, JSON, SARIF, and patch.
+- Copy Prompt is per-finding and includes audit provenance, repository state,
+  all evidence and recommendations, the context manifest, and current redacted
+  source. It does not contact a model or modify the repository.
+- One active local audit job at a time.
+- Exports: HTML, JSON, and SARIF.
 - Optional shared repository policy lives in `.perfora.yaml`.
 - No automatic telemetry.
 
@@ -47,10 +45,8 @@ Setup health
 → Start audit
 → Stream deterministic analysis
 → Inspect the selected flow's findings, evidence, and recommendations
-→ Generate fix
-→ Review exact patch
-→ Approve on clean worktree
-→ Verify
+→ Copy complete finding prompt
+→ Hand off to the user's chosen AI agent
 → Export
 ```
 
