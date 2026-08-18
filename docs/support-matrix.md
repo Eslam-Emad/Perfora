@@ -1,7 +1,8 @@
 # Perfora support and scan-coverage matrix
 
-This document defines what a Perfora `0.3` static audit does and does not inspect.
-The recorded `scan_coverage` object is the authoritative per-run result.
+This document defines what Perfora `0.4` inspects through static audits and
+imported runtime artifacts. The recorded `scan_coverage` object remains the
+authoritative static per-run result.
 
 ## Product environment
 
@@ -45,6 +46,30 @@ not performed.
 
 The analyzer version is stored separately from the rule-pack version. Updating
 the implementation does not silently change the version attached to old audits.
+
+## Runtime artifact imports
+
+| Artifact family | Accepted evidence | Current analysis |
+| --- | --- | --- |
+| DevTools/Chrome timeline JSON | Complete trace events with names, timestamps, durations, threads, and optional source fields | Janky frames, UI/raster duration summaries, expensive build/layout/paint events |
+| CPU profile JSON | Nodes, samples/hit counts, timestamps, call-frame source fields | Sample concentration and hot-path breakdown |
+| Memory summary JSON | Timestamped heap-usage samples | Initial/final/peak heap and material observed growth |
+| Heap comparison JSON | Explicit baseline/current heap byte values | Heap delta and material regression |
+| Flutter `TimelineSummary` JSON | Frame build/raster arrays and summary fields | Budget misses and linked UI/raster frame evidence |
+| Flutter analyze-size JSON | Hierarchical name/size tree | Total bytes, largest items, and before/after size delta |
+| HAR 1.x | Request method/URL, response status/size, total duration | Slow/failed request observations and aggregate timing/bytes |
+
+Raw artifacts are not persisted. Perfora stores the SHA-256 hash, filename,
+format, declared or embedded build mode, available Flutter/Dart/DevTools
+versions, sanitized metrics, bounded evidence, and JSON trace references.
+Network query strings, headers, request/response bodies, and cookies are not
+retained. Artifact JSON is limited to 25 MB.
+
+Profile mode is required for trusted timing, CPU, memory, and network findings.
+Release mode is trusted only for app-size analysis. Debug artifacts are labeled
+`unreliable`; unknown-mode artifacts are `unverified`. Both may retain metrics
+for inspection but their threshold findings are withheld. Comparisons require
+the same repository path and artifact family and warn on tool-version drift.
 
 ## Exclusions and skip reasons
 
@@ -111,7 +136,7 @@ secrets are redacted before the prompt reaches the browser. Prompt generation:
 
 ## Not currently covered
 
-- Runtime frame, startup, CPU, memory, network, or bundle measurements
+- Guided device capture, startup-specific traces, and automated retaining paths
 - Semantic type resolution across the complete Dart program
 - Native Kotlin, Java, Swift, or Objective-C source analysis
 - Android network-security-config interpretation

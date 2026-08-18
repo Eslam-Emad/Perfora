@@ -1,4 +1,12 @@
-version: 1
+version: 2
+
+# Reuse one or more reviewed local organization packs. Relative paths resolve
+# from this file; remote URLs are rejected. Later layers override scalar values,
+# while exclusions, suppressions, and ownership routes are additive.
+extends: []
+#  - ../security-policy/mobile.yaml
+
+organization: Example mobile engineering
 
 audit:
   types:
@@ -22,6 +30,18 @@ exclude:
 suppressions:
   require_reason: true
   require_expiry: true
+  require_approval: true
+
+ownership:
+  require_owner_for: [high, critical]
+  require_due_date_for: [critical]
+  routes:
+    - owner: Application security
+      control_groups: [MASVS-NETWORK, MASVS-STORAGE, MASVS-CRYPTO]
+      due_days: 14
+    - owner: Mobile platform
+      severities: [critical]
+      due_days: 7
 
 # Suppress by the stable fingerprint emitted in JSON, HTML, and SARIF.
 # Expired suppressions remain visible and no longer bypass the policy gate.
@@ -29,3 +49,6 @@ suppress: []
 #  - fingerprint: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 #    reason: Accepted temporarily while the backend completes its HTTPS migration.
 #    expires: 2026-12-31
+#    approved_by: Security review board
+#    approved_at: 2026-08-17
+#    ticket_url: https://issues.example/SEC-123

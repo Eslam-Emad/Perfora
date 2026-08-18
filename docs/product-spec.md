@@ -14,7 +14,14 @@ provider and enforce repository-owned policy against a Git baseline.
 - Full local-first web application, officially supporting macOS first.
 - React/Vite frontend, FastAPI backend, Dart analyzer worker, SQLite storage.
 - Single local user; no accounts, organizations, or roles.
+- Organization governance is local and file-backed: policies may inherit reviewed
+  local packs, route ownership, require due dates, and require suppression approval.
 - Providers are OpenCode (CLI-backed), Ollama, and OpenAI.
+- The local user can add, replace, or remove their own OpenAI API key and edit
+  the Ollama base URL from Settings. Secret values are write-only in the browser
+  and never returned by settings APIs; provider discovery refreshes immediately.
+- Ollama is local only when its configured endpoint is loopback. A non-loopback
+  endpoint and Ollama cloud models are remote source-transmission boundaries.
 - Models are discovered dynamically. Every audit stores the exact provider,
   model identifier, and model metadata used. There is no silent fallback.
 - Deterministic analysis establishes evidence. Models explain, prioritize, and
@@ -67,7 +74,8 @@ provider and enforce repository-owned policy against a Git baseline.
 - Persisted audit records are versioned and database changes use ordered schema
   migrations with legacy-record defaults.
 - One active local audit job at a time.
-- Exports: HTML, JSON, SARIF, and CycloneDX 1.7.
+- Exports: HTML, JSON, SARIF, CycloneDX 1.7, and a redacted evidence ZIP with
+  checksums plus optional local HMAC signing.
 - Optional shared repository policy lives in `.perfora.yaml`.
 - The `perfora audit` CLI is analyzer-only. It supports repeated rule-pack
   selection, include/exclude globs, bounded timeouts, JSON/HTML/SARIF artifacts,
@@ -77,6 +85,15 @@ provider and enforce repository-owned policy against a Git baseline.
   current worktree. SARIF paths stay repository-relative and results use stable
   partial fingerprints.
 - No automatic telemetry.
+- Runtime performance evidence is imported locally as versioned captures.
+  Supported families are DevTools/Chrome timeline and CPU data, memory summaries
+  and heap comparisons, Flutter frame timing and analyze-size JSON, and HAR.
+- Runtime findings require trusted profile-mode provenance, except that release
+  app-size artifacts are valid. Debug artifacts remain visible but explicitly
+  unreliable and cannot produce trusted threshold findings.
+- Every runtime finding references one or more persisted observed events. Runtime
+  comparisons require the same repository and artifact family and never produce
+  an overall performance score.
 
 ## Tracer-bullet acceptance path
 
@@ -94,6 +111,9 @@ Setup health
 → Hand off to the user's chosen AI agent
 → Mark the implemented finding resolved
 → Re-run deterministic verification and inspect the persisted result
+→ Import profile-mode runtime artifacts and compare equivalent captures
+→ Review local portfolio governance and recurrence trends
+→ Copy a redacted issue handoff or export a compliance evidence package
 → Export
 ```
 
@@ -104,7 +124,7 @@ of that path.
 
 ## Non-goals for the first tracer bullet
 
-- Runtime frame, memory, startup, network, or bundle profiling.
+- Guided or automatic runtime capture from a connected device.
 - Team hosting, authentication, RBAC, or remote Git integrations.
 - Batch or autonomous patch application.
 - Concurrent audit execution.

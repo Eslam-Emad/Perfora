@@ -1,0 +1,5 @@
+{
+  "metadata": {"buildMode": "profile"},
+  "baseline": {"usedBytes": 20000000},
+  "current": {"usedBytes": 50000000}
+}

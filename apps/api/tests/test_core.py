@@ -1,12 +1,18 @@
+import hashlib
+import hmac
+import io
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+import stat
+import zipfile
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from perfora import analyzer_client, repositories
+from perfora import main as main_module
 from perfora.analyzer_client import DartAnalyzerClient
 from perfora.audits import AuditCoordinator
 from perfora.comparisons import AuditComparisonService
@@ -20,7 +26,9 @@ from perfora.domain import (
     Finding,
     FindingUpdate,
     ModelEnrichment,
+    ProviderCatalog,
     ProviderId,
+    ProviderSettingsUpdate,
     RepositorySnapshot,
     RulePackMetadata,
     ScanCoverage,
@@ -28,11 +36,19 @@ from perfora.domain import (
     TriageStatus,
     VerificationOutcome,
 )
-from perfora.exports import export_html, export_sarif
+from perfora.exports import export_evidence_package, export_html, export_sarif
 from perfora.findings import FindingService, FindingUpdateError
+from perfora.handoffs import TicketHandoffService
 from perfora.main import app
+from perfora.portfolio import PortfolioService
 from perfora.prompts import PromptService
+from perfora.provider_settings import (
+    ProviderSettingsError,
+    ProviderSettingsService,
+    normalize_ollama_base_url,
+)
 from perfora.providers.base import ProviderStructuredOutputError
+from perfora.providers.ollama import OllamaAdapter
 from perfora.providers.opencode import (
     OpenCodeAdapter,
     _decode_json_object,
@@ -59,6 +75,188 @@ def test_legacy_mutating_fix_routes_are_not_exposed() -> None:
     assert "patch" in paths["/api/audits/{audit_id}/findings/{finding_id}"]
     assert "/api/audits/{audit_id}/comparison" in paths
     assert "post" in paths["/api/audits/{audit_id}/findings/{finding_id}/verify"]
+    assert "/api/portfolio" in paths
+    assert "/api/audits/{audit_id}/findings/{finding_id}/ticket-handoff" in paths
+    assert "get" in paths["/api/settings/providers"]
+    assert "patch" in paths["/api/settings/providers"]
+
+
+def test_provider_settings_are_write_only_and_preserve_unrelated_local_config(
+    tmp_path: Path,
+) -> None:
+    local_env = tmp_path / ".env.local"
+    local_env.write_text("# Local overrides\nUNRELATED_SETTING=keep\n", encoding="utf-8")
+    local_settings = Settings(
+        database_path=tmp_path / "settings.db",
+        local_env_path=local_env,
+        openai_api_key=None,
+        process_openai_api_key=None,
+        ollama_base_url="http://127.0.0.1:11434",
+        process_ollama_base_url=None,
+    )
+    service = ProviderSettingsService(local_settings)
+    secret = "sk-test-provider-settings-0123456789"
+
+    snapshot = service.update(
+        ProviderSettingsUpdate(
+            openai_api_key=secret,
+            ollama_base_url="https://ollama.example.test:11434/",
+        )
+    )
+
+    saved = local_env.read_text(encoding="utf-8")
+    assert snapshot.openai.configured is True
+    assert snapshot.openai.source == "settings"
+    assert snapshot.ollama.base_url == "https://ollama.example.test:11434"
+    assert snapshot.ollama.locality == "remote"
+    assert secret not in snapshot.model_dump_json()
+    assert "UNRELATED_SETTING=keep" in saved
+    assert secret in saved
+    assert stat.S_IMODE(local_env.stat().st_mode) == 0o600
+
+    cleared = service.update(ProviderSettingsUpdate(clear_openai_api_key=True))
+
+    assert cleared.openai.configured is False
+    assert "OPENAI_API_KEY" not in local_env.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "file:///tmp/ollama.sock",
+        "http://user:password@localhost:11434",
+        "http://localhost:11434/api",
+        "http://localhost:invalid",
+        "http://localhost:11434\nPERFORA_OLLAMA_BASE_URL=https://example.test",
+    ],
+)
+def test_rejects_unsafe_or_ambiguous_ollama_urls(value: str) -> None:
+    with pytest.raises(ProviderSettingsError):
+        normalize_ollama_base_url(value)
+
+
+def test_provider_settings_api_never_returns_the_openai_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local_settings = Settings(
+        database_path=tmp_path / "settings-api.db",
+        local_env_path=tmp_path / ".env.local",
+        openai_api_key=None,
+        process_openai_api_key=None,
+        process_ollama_base_url=None,
+    )
+
+    class FakeProviders:
+        async def catalogs(self):
+            return [
+                ProviderCatalog(
+                    provider=ProviderId.OPENAI,
+                    available=True,
+                    detail="Mocked provider",
+                )
+            ]
+
+    monkeypatch.setattr(main_module, "provider_settings", ProviderSettingsService(local_settings))
+    monkeypatch.setattr(main_module, "providers", FakeProviders())
+    secret = "sk-test-api-response-012345678901"
+
+    client = TestClient(app)
+    response = client.patch("/api/settings/providers", json={"openai_api_key": secret})
+    status_response = client.get("/api/settings/providers")
+
+    assert response.status_code == 200
+    assert response.json()["settings"]["openai"] == {
+        "configured": True,
+        "source": "settings",
+    }
+    assert response.json()["providers"][0]["detail"] == "Mocked provider"
+    assert secret not in response.text
+    assert secret not in status_response.text
+
+
+@pytest.mark.asyncio
+async def test_remote_ollama_endpoint_marks_discovered_models_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": [{"name": "qwen2.5-coder:7b"}]}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            assert url == "https://ollama.example.test:11434/api/tags"
+            return FakeResponse()
+
+    monkeypatch.setattr("perfora.providers.ollama.httpx.AsyncClient", FakeClient)
+    adapter = OllamaAdapter(
+        Settings(
+            database_path=tmp_path / "ollama.db",
+            ollama_base_url="https://ollama.example.test:11434",
+        )
+    )
+
+    catalog = await adapter.catalog()
+
+    assert catalog.available is True
+    assert catalog.models[0].locality == "remote"
+    assert catalog.detail == "1 model(s) at remote Ollama endpoint"
+
+
+def test_runtime_capture_import_list_detail_and_comparison_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pubspec.yaml").write_text(
+        "name: runtime_fixture\ndependencies:\n  flutter:\n    sdk: flutter\n"
+    )
+    runtime_store = AuditStore(tmp_path / "runtime-api.db")
+    monkeypatch.setattr(main_module, "store", runtime_store)
+    monkeypatch.setattr(
+        main_module,
+        "runtime_artifacts",
+        main_module.RuntimeArtifactService(runtime_store),
+    )
+    body = {
+        "repository_path": str(tmp_path),
+        "filename": "frame_timing.json",
+        "content": json.dumps(
+            {
+                "frame_count": 2,
+                "frame_build_times": [5000, 24000],
+                "frame_rasterizer_times": [5000, 6000],
+            }
+        ),
+        "build_mode": "profile",
+        "flutter_version": "3.35.0",
+        "devtools_version": "2.48.0",
+    }
+
+    client = TestClient(app)
+    imported = client.post("/api/runtime-captures/import", json=body)
+    capture_id = imported.json()["id"]
+    listed = client.get("/api/runtime-captures", params={"repository_path": str(tmp_path)})
+    detail = client.get(f"/api/runtime-captures/{capture_id}")
+    comparison = client.get(
+        "/api/runtime-captures/compare",
+        params={"baseline_id": capture_id, "current_id": capture_id},
+    )
+
+    assert imported.status_code == 201
+    assert imported.json()["kind"] == "frame_timing"
+    assert listed.json()["captures"][0]["id"] == capture_id
+    assert detail.json()["provenance"]["flutter_version"] == "3.35.0"
+    assert comparison.json()["compatible"] is True
 
 
 @pytest.mark.asyncio
@@ -239,9 +437,7 @@ async def test_dart_analyzer_selects_the_security_rule_pack(tmp_path: Path, monk
                     "skipped_by_reason": {"generated_source": 1},
                     "rules_executed": ["security.hardcoded_secret"],
                     "scanned_files": ["lib/a.dart", "lib/b.dart"],
-                    "skipped_files_by_reason": {
-                        "generated_source": ["lib/generated.g.dart"]
-                    },
+                    "skipped_files_by_reason": {"generated_source": ["lib/generated.g.dart"]},
                 },
                 "findings": [],
             }
@@ -291,7 +487,7 @@ def test_database_migrates_and_loads_a_legacy_audit(tmp_path: Path) -> None:
 
     assert store.schema_version == DATABASE_SCHEMA_VERSION
     assert loaded is not None
-    assert loaded.record_version == 5
+    assert loaded.record_version == 6
     assert loaded.analyzer_version == "unknown"
     assert loaded.findings[0].rule_version == "legacy"
     assert loaded.findings[0].model_enrichment is not None
@@ -312,6 +508,79 @@ def test_exports_evidence_as_html_and_sarif(tmp_path: Path) -> None:
     assert '"triageStatus": "new"' in sarif
     assert '"verificationOutcome": null' in sarif
     assert "<strong>Triage:</strong> new" in html
+
+
+def test_exports_redacted_checksummed_and_signed_evidence_package(tmp_path: Path) -> None:
+    audit = _audit(tmp_path)
+    audit.findings[0].evidence.append("Authorization: Bearer sk-example012345678901234567890")
+
+    package = export_evidence_package(audit, "organization-signing-key")
+
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        names = set(archive.namelist())
+        manifest = json.loads(archive.read("manifest.json"))
+        assert names == {
+            "audit.json",
+            "report.html",
+            "results.sarif.json",
+            "dependencies.cdx.json",
+            "manifest.json",
+        }
+        for name, metadata in manifest["files"].items():
+            assert hashlib.sha256(archive.read(name)).hexdigest() == metadata["sha256"]
+        assert b"sk-example" not in archive.read("audit.json")
+        assert b"[REDACTED]" in archive.read("audit.json")
+        unsigned = {key: value for key, value in manifest.items() if key != "signature"}
+        payload = json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        expected = hmac.new(b"organization-signing-key", payload, hashlib.sha256).hexdigest()
+        assert manifest["signature"] == {
+            "algorithm": "hmac-sha256",
+            "value": expected,
+        }
+
+
+def test_builds_local_portfolio_governance_and_redacted_ticket_handoff(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "portfolio.db")
+    older = _audit(tmp_path)
+    older.id = "older"
+    older.created_at = datetime(2026, 8, 1, tzinfo=UTC)
+    older.updated_at = older.created_at
+    older.findings[0].audit_id = older.id
+    store.save(older)
+
+    current = _audit(tmp_path)
+    current.id = "current"
+    current.created_at = datetime(2026, 8, 17, tzinfo=UTC)
+    current.updated_at = current.created_at
+    current.findings[0].audit_id = current.id
+    current.findings[0].severity = "critical"
+    current.findings[0].comparison_status = ComparisonStatus.REGRESSED
+    current.findings[0].evidence.append("Authorization: Bearer sk-example012345678901234567890")
+    store.save(current)
+    failed = _audit(tmp_path)
+    failed.id = "failed"
+    failed.status = "failed"
+    failed.created_at = datetime(2026, 8, 18, tzinfo=UTC)
+    failed.updated_at = failed.created_at
+    failed.findings = []
+    store.save(failed)
+
+    portfolio = PortfolioService(store).summary()
+    handoff = TicketHandoffService(store).build(current.id, current.findings[0].id, "jira")
+
+    assert portfolio["totals"]["repositories"] == 1
+    assert portfolio["totals"]["audits"] == 3
+    assert portfolio["totals"]["open_findings"] == 1
+    assert portfolio["totals"]["recurrences"] == 1
+    assert portfolio["totals"]["governance_issues"] == 2
+    assert portfolio["owners"] == [{"owner": "Unassigned", "open": 1, "overdue": 0}]
+    assert handoff["system"] == "jira"
+    assert handoff["automatic_creation"] is False
+    assert "sha256:fixture" in handoff["body"]
+    assert "[REDACTED]" in handoff["body"]
+    assert "sk-example" not in handoff["body"]
 
 
 def test_builds_complete_secret_redacted_agent_prompt(tmp_path: Path) -> None:
@@ -439,6 +708,32 @@ def test_updates_finding_triage_with_reason_note_and_history(tmp_path: Path) -> 
     assert updated.status_history[0].to_status == TriageStatus.RISK_ACCEPTED
 
 
+def test_policy_requires_reviewed_suppression_instead_of_manual_risk_acceptance(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".perfora.yaml").write_text(
+        """version: 2
+suppressions:
+  require_reason: true
+  require_expiry: true
+  require_approval: true
+"""
+    )
+    store = AuditStore(tmp_path / "approved-suppression.db")
+    audit = _audit(tmp_path)
+    store.save(audit)
+
+    with pytest.raises(FindingUpdateError, match="approved suppression"):
+        FindingService(store).update(
+            audit.id,
+            audit.findings[0].id,
+            FindingUpdate(
+                triage_status=TriageStatus.RISK_ACCEPTED,
+                disposition_reason="Requested exception",
+            ),
+        )
+
+
 def test_compares_new_unchanged_resolved_regressed_and_severity_changes(
     tmp_path: Path,
 ) -> None:
@@ -525,6 +820,36 @@ def test_compares_new_unchanged_resolved_regressed_and_severity_changes(
     assert comparison.regressed_finding_ids == ["current-regressed"]
     assert comparison.severity_changes[0].finding_id == "current-severity"
     assert comparison.resolved_findings[0].id == "baseline-resolved"
+
+
+def test_removed_policy_suppression_does_not_leak_into_the_next_audit(
+    tmp_path: Path,
+) -> None:
+    store = AuditStore(tmp_path / "policy-suppression.db")
+    previous = _audit(tmp_path)
+    previous.id = "previous-policy"
+    previous.created_at = datetime(2026, 8, 1, tzinfo=UTC)
+    previous.updated_at = previous.created_at
+    previous.findings[0].audit_id = previous.id
+    previous.findings[0].triage_status = TriageStatus.RISK_ACCEPTED
+    previous.findings[0].disposition_reason = "Approved temporary exception"
+    previous.findings[0].suppression_expires_at = datetime(2026, 12, 31, tzinfo=UTC)
+    previous.findings[0].suppression_policy_managed = True
+    previous.findings[0].suppression_approved_by = "Security review board"
+    previous.findings[0].suppression_approved_at = date(2026, 8, 1)
+    store.save(previous)
+
+    current = _audit(tmp_path)
+    current.id = "current-policy"
+    current.created_at = datetime(2026, 8, 17, tzinfo=UTC)
+    current.updated_at = current.created_at
+    current.findings[0].audit_id = current.id
+
+    AuditComparisonService(store).apply_baseline(current)
+
+    assert current.findings[0].triage_status == TriageStatus.NEW
+    assert current.findings[0].suppression_approved_by is None
+    assert current.findings[0].suppression_expires_at is None
 
 
 def test_applies_baseline_triage_and_reopens_resolved_findings(tmp_path: Path) -> None:
@@ -673,6 +998,21 @@ async def test_verification_rejects_legacy_or_unresolved_findings(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_model_enrichment_does_not_replace_deterministic_content(tmp_path: Path) -> None:
+    raw_finding = {
+        "rule_id": "lifecycle.missing_cleanup",
+        "rule_version": "1.0.0",
+        "title": "Controller is not released",
+        "severity": "high",
+        "confidence": 0.94,
+        "file": "lib/controller.dart",
+        "line": 8,
+        "symbol": "Owner.controller",
+        "framework": "Provider",
+        "evidence": ["Controller is owned by the class."],
+        "explanation": "Deterministic explanation",
+        "recommendation": "Deterministic recommendation",
+    }
+
     class AnalyzerStub:
         async def analyze(self, *_):
             return AnalyzerResult(
@@ -686,22 +1026,7 @@ async def test_model_enrichment_does_not_replace_deterministic_content(tmp_path:
                     scanned_files=["lib/controller.dart"],
                     skipped_files_by_reason={},
                 ),
-                findings=[
-                    {
-                        "rule_id": "lifecycle.missing_cleanup",
-                        "rule_version": "1.0.0",
-                        "title": "Controller is not released",
-                        "severity": "high",
-                        "confidence": 0.94,
-                        "file": "lib/controller.dart",
-                        "line": 8,
-                        "symbol": "Owner.controller",
-                        "framework": "Provider",
-                        "evidence": ["Controller is owned by the class."],
-                        "explanation": "Deterministic explanation",
-                        "recommendation": "Deterministic recommendation",
-                    }
-                ],
+                findings=[raw_finding],
             )
 
     class ProviderStub:
@@ -712,6 +1037,27 @@ async def test_model_enrichment_does_not_replace_deterministic_content(tmp_path:
             }
 
     database_path = tmp_path / "audit.db"
+    fingerprint = AuditCoordinator._fingerprint(AuditCoordinator._fingerprint_basis(raw_finding))
+    (tmp_path / ".perfora.yaml").write_text(
+        f"""version: 2
+organization: Mobile engineering
+suppressions:
+  require_reason: true
+  require_expiry: true
+  require_approval: true
+suppress:
+  - fingerprint: {fingerprint}
+    reason: Approved migration exception
+    expires: 2099-01-01
+    approved_by: Security review board
+    approved_at: 2026-08-17
+ownership:
+  routes:
+    - owner: Mobile platform
+      rule_ids: [lifecycle.missing_cleanup]
+      due_days: 7
+"""
+    )
     store = AuditStore(database_path)
     audit = _audit(tmp_path)
     audit.findings = []
@@ -726,6 +1072,13 @@ async def test_model_enrichment_does_not_replace_deterministic_content(tmp_path:
     assert completed.findings[0].recommendation == "Deterministic recommendation"
     assert completed.findings[0].model_enrichment is not None
     assert completed.findings[0].model_enrichment.recommendation == "Model recommendation"
+    assert completed.organization == "Mobile engineering"
+    assert completed.policy_sources == [str(tmp_path / ".perfora.yaml")]
+    assert completed.findings[0].owner == "Mobile platform"
+    assert completed.findings[0].triage_status == TriageStatus.RISK_ACCEPTED
+    assert completed.findings[0].suppression_policy_managed is True
+    assert completed.findings[0].suppression_approved_by == "Security review board"
+    assert completed.findings[0].status_history[0].to_status == TriageStatus.RISK_ACCEPTED
     assert completed.analyzer_version == "0.3.0"
     assert completed.scan_coverage.files_scanned == 1
 

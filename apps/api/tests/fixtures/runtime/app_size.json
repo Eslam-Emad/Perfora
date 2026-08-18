@@ -1,0 +1,8 @@
+{
+  "metadata": {"buildMode": "release", "flutterVersion": "3.35.0"},
+  "name": "app",
+  "children": [
+    {"name": "package:feature", "size": 7000000},
+    {"name": "assets", "size": 3000000}
+  ]
+}

@@ -15,6 +15,17 @@ export type VerificationOutcome =
   | "still_present"
   | "inconclusive"
   | "error";
+export type RuntimeArtifactKind =
+  | "auto"
+  | "timeline"
+  | "cpu_profile"
+  | "memory_snapshot"
+  | "heap_comparison"
+  | "app_size"
+  | "frame_timing"
+  | "network_trace";
+export type RuntimeBuildMode = "profile" | "release" | "debug" | "unknown";
+export type RuntimeReliability = "trusted" | "unreliable" | "unverified";
 
 export interface ToolStatus {
   id: string;
@@ -45,6 +56,23 @@ export interface ProviderCatalog {
 
 export interface SetupStatus {
   tools: ToolStatus[];
+  providers: ProviderCatalog[];
+}
+
+export interface ProviderSettingsSnapshot {
+  openai: {
+    configured: boolean;
+    source: "settings" | "environment" | "none";
+  };
+  ollama: {
+    base_url: string;
+    source: "settings" | "environment" | "default";
+    locality: "local" | "remote";
+  };
+}
+
+export interface ProviderSettingsUpdateResult {
+  settings: ProviderSettingsSnapshot;
   providers: ProviderCatalog[];
 }
 
@@ -132,6 +160,10 @@ export interface Finding {
   resolution_commit?: string;
   disposition_reason?: string;
   suppression_expires_at?: string;
+  suppression_policy_managed?: boolean;
+  suppression_approved_by?: string;
+  suppression_approved_at?: string;
+  suppression_ticket_url?: string;
   ticket_url?: string;
   notes: FindingNote[];
   status_history: FindingStatusChange[];
@@ -215,6 +247,8 @@ export interface AuditRecord {
   scan_coverage?: ScanCoverage;
   baseline_audit_id?: string;
   dependency_inventory?: DependencyInventory;
+  organization?: string;
+  policy_sources?: string[];
 }
 
 export interface AgentPrompt {
@@ -262,4 +296,141 @@ export interface AuditComparison {
       to_version: string;
     }>;
   };
+}
+
+export interface RuntimeArtifactProvenance {
+  filename: string;
+  sha256: string;
+  artifact_format: string;
+  build_mode: RuntimeBuildMode;
+  build_mode_source: "artifact" | "declared" | "unknown";
+  flutter_version?: string;
+  devtools_version?: string;
+  dart_version?: string;
+  captured_at?: string;
+  imported_at: string;
+}
+
+export interface RuntimeEvidence {
+  id: string;
+  kind: string;
+  name: string;
+  trace_reference: string;
+  timestamp_us?: number;
+  duration_us?: number;
+  value?: number;
+  unit?: string;
+  thread?: string;
+  source_file?: string;
+  source_line?: number;
+  details: Record<string, string | number | boolean | null>;
+}
+
+export interface RuntimeFinding {
+  id: string;
+  rule_id: string;
+  rule_version: string;
+  title: string;
+  severity: Finding["severity"];
+  confidence: number;
+  explanation: string;
+  recommendation: string;
+  evidence_ids: string[];
+  source_file?: string;
+  source_line?: number;
+  observed: true;
+}
+
+export interface RuntimeBreakdownItem {
+  name: string;
+  value: number;
+  unit: string;
+  trace_reference?: string;
+}
+
+export interface RuntimeCapture {
+  id: string;
+  record_version: number;
+  repository: RepositorySnapshot;
+  label: string;
+  kind: Exclude<RuntimeArtifactKind, "auto">;
+  reliability: RuntimeReliability;
+  provenance: RuntimeArtifactProvenance;
+  metrics: Record<string, number>;
+  metric_units: Record<string, string>;
+  breakdowns: Record<string, RuntimeBreakdownItem[]>;
+  evidence: RuntimeEvidence[];
+  findings: RuntimeFinding[];
+  warnings: string[];
+  created_at: string;
+}
+
+export interface RuntimeMetricDelta {
+  metric: string;
+  unit: string;
+  baseline: number;
+  current: number;
+  delta: number;
+  percent_change?: number;
+  direction: "improved" | "regressed" | "unchanged" | "informational";
+}
+
+export interface RuntimeCaptureComparison {
+  baseline_capture_id: string;
+  current_capture_id: string;
+  compatible: boolean;
+  warnings: string[];
+  metric_deltas: RuntimeMetricDelta[];
+  new_finding_rule_ids: string[];
+  resolved_finding_rule_ids: string[];
+}
+
+export interface PortfolioRepository {
+  path: string;
+  name: string;
+  latest_audit_at: string;
+  audit_count: number;
+  open_findings: number;
+  high_or_critical: number;
+  verified_resolved: number;
+  recurrences: number;
+  governance_issues: number;
+  governance: Record<string, number>;
+}
+
+export interface PortfolioSummary {
+  generated_at: string;
+  scope: string;
+  totals: {
+    repositories: number;
+    audits: number;
+    open_findings: number;
+    high_or_critical: number;
+    verified_resolved: number;
+    recurrences: number;
+    governance_issues: number;
+  };
+  repositories: PortfolioRepository[];
+  owners: Array<{ owner: string; open: number; overdue: number }>;
+  trends: Array<{
+    audit_id: string;
+    repository: string;
+    audit_type: AuditType;
+    created_at: string;
+    total: number;
+    new: number;
+    regressed: number;
+    verified_resolved: number;
+  }>;
+}
+
+export interface TicketHandoff {
+  system: "github" | "jira" | "linear" | "generic";
+  title: string;
+  body: string;
+  labels: string[];
+  finding_id: string;
+  audit_id: string;
+  redacted: true;
+  automatic_creation: false;
 }

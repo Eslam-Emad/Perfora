@@ -190,23 +190,59 @@ class AuditComparisonService:
 
     @staticmethod
     def _carry_triage(previous: Finding, current: Finding) -> None:
+        current_policy_suppression = (
+            current.triage_status,
+            current.disposition_reason,
+            current.suppression_expires_at,
+            current.suppression_policy_managed,
+            current.suppression_approved_by,
+            current.suppression_approved_at,
+            current.suppression_ticket_url,
+        )
         current.triage_status = previous.triage_status
         current.owner = previous.owner
         current.due_at = previous.due_at
         current.resolution_commit = previous.resolution_commit
         current.disposition_reason = previous.disposition_reason
         current.suppression_expires_at = previous.suppression_expires_at
+        current.suppression_policy_managed = previous.suppression_policy_managed
+        current.suppression_approved_by = previous.suppression_approved_by
+        current.suppression_approved_at = previous.suppression_approved_at
+        current.suppression_ticket_url = previous.suppression_ticket_url
         current.ticket_url = previous.ticket_url
         current.notes = list(previous.notes)
         current.status_history = list(previous.status_history)
         current.verification_attempts = list(previous.verification_attempts)
+        if previous.suppression_policy_managed:
+            if current_policy_suppression[3]:
+                (
+                    current.triage_status,
+                    current.disposition_reason,
+                    current.suppression_expires_at,
+                    current.suppression_policy_managed,
+                    current.suppression_approved_by,
+                    current.suppression_approved_at,
+                    current.suppression_ticket_url,
+                ) = current_policy_suppression
+            else:
+                current.triage_status = TriageStatus.NEW
+                current.disposition_reason = None
+                current.suppression_expires_at = None
+                current.suppression_policy_managed = False
+                current.suppression_approved_by = None
+                current.suppression_approved_at = None
+                current.suppression_ticket_url = None
 
     @staticmethod
     def _suppression_expired(finding: Finding, now: datetime) -> bool:
-        if finding.triage_status not in {
-            TriageStatus.FALSE_POSITIVE,
-            TriageStatus.RISK_ACCEPTED,
-        } or finding.suppression_expires_at is None:
+        if (
+            finding.triage_status
+            not in {
+                TriageStatus.FALSE_POSITIVE,
+                TriageStatus.RISK_ACCEPTED,
+            }
+            or finding.suppression_expires_at is None
+        ):
             return False
         expiration = finding.suppression_expires_at
         if expiration.tzinfo is None:

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from . import __version__
 from .analyzer_client import DartAnalyzerClient
@@ -14,10 +14,25 @@ from .audits import AuditCoordinator
 from .comparisons import AuditComparisonService, ComparisonError
 from .config import settings
 from .database import AuditStore
-from .domain import AuditCreate, FindingUpdate, RepositoryRequest
-from .exports import export_audit_cyclonedx, export_html, export_json, export_sarif
+from .domain import (
+    AuditCreate,
+    FindingUpdate,
+    ProviderSettingsUpdate,
+    RepositoryRequest,
+    RuntimeImportRequest,
+)
+from .exports import (
+    export_audit_cyclonedx,
+    export_evidence_package,
+    export_html,
+    export_json,
+    export_sarif,
+)
 from .findings import FindingService, FindingUpdateError
+from .handoffs import TicketHandoffService, TicketSystem
+from .portfolio import PortfolioService
 from .prompts import PromptBuildError, PromptService
+from .provider_settings import ProviderSettingsError, ProviderSettingsService
 from .providers import ProviderRegistry
 from .repositories import (
     RepositoryPickerCancelled,
@@ -25,6 +40,7 @@ from .repositories import (
     inspect_repository,
     pick_repository_path,
 )
+from .runtime_artifacts import RuntimeArtifactError, RuntimeArtifactService
 from .setup import tool_health
 from .verifications import VerificationError, VerificationService
 
@@ -36,6 +52,10 @@ prompts = PromptService(store)
 findings = FindingService(store)
 comparisons = AuditComparisonService(store)
 verifications = VerificationService(store, analyzer)
+runtime_artifacts = RuntimeArtifactService(store)
+portfolio = PortfolioService(store)
+ticket_handoffs = TicketHandoffService(store)
+provider_settings = ProviderSettingsService(settings)
 
 
 @asynccontextmanager
@@ -71,6 +91,20 @@ async def model_catalogs() -> dict:
     return {"providers": await providers.catalogs()}
 
 
+@app.get("/api/settings/providers")
+async def get_provider_settings():
+    return provider_settings.snapshot()
+
+
+@app.patch("/api/settings/providers")
+async def update_provider_settings(request: ProviderSettingsUpdate):
+    try:
+        snapshot = provider_settings.update(request)
+    except ProviderSettingsError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    return {"settings": snapshot, "providers": await providers.catalogs()}
+
+
 @app.post("/api/repositories/validate")
 async def validate_repository(request: RepositoryRequest):
     return await inspect_repository(request.path)
@@ -90,6 +124,43 @@ async def pick_repository():
 @app.get("/api/audits")
 async def list_audits() -> dict:
     return {"audits": store.list()}
+
+
+@app.get("/api/portfolio")
+async def portfolio_summary() -> dict:
+    return portfolio.summary()
+
+
+@app.get("/api/runtime-captures")
+async def list_runtime_captures(repository_path: str | None = None) -> dict:
+    return {"captures": store.list_runtime_captures(repository_path)}
+
+
+@app.post("/api/runtime-captures/import", status_code=201)
+async def import_runtime_capture(request: RuntimeImportRequest):
+    repository = await inspect_repository(request.repository_path)
+    if not repository.valid:
+        raise HTTPException(status_code=422, detail=repository.detail)
+    try:
+        return runtime_artifacts.import_capture(request, repository)
+    except RuntimeArtifactError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+
+
+@app.get("/api/runtime-captures/compare")
+async def compare_runtime_captures(baseline_id: str, current_id: str):
+    try:
+        return runtime_artifacts.compare(baseline_id, current_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Runtime capture not found") from None
+
+
+@app.get("/api/runtime-captures/{capture_id}")
+async def get_runtime_capture(capture_id: str):
+    capture = store.get_runtime_capture(capture_id)
+    if not capture:
+        raise HTTPException(status_code=404, detail="Runtime capture not found")
+    return capture
 
 
 @app.post("/api/audits", status_code=202)
@@ -164,6 +235,18 @@ async def verify_finding(audit_id: str, finding_id: str):
         raise HTTPException(status_code=409, detail=str(error)) from None
 
 
+@app.get("/api/audits/{audit_id}/findings/{finding_id}/ticket-handoff")
+async def build_ticket_handoff(
+    audit_id: str,
+    finding_id: str,
+    system: TicketSystem = "generic",
+):
+    try:
+        return ticket_handoffs.build(audit_id, finding_id, system)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Audit or finding not found") from None
+
+
 @app.get("/api/audits/{audit_id}/events")
 async def stream_audit_events(audit_id: str):
     if not store.get(audit_id):
@@ -186,11 +269,30 @@ async def stream_audit_events(audit_id: str):
 
 @app.get("/api/audits/{audit_id}/export")
 async def export_audit(
-    audit_id: str, format: str = Query(pattern="^(json|html|sarif|cyclonedx)$")
+    audit_id: str,
+    format: str = Query(pattern="^(json|html|sarif|cyclonedx|evidence)$"),
 ):
     audit = store.get(audit_id)
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
+    if format == "evidence":
+        package = export_evidence_package(audit, settings.report_signing_key)
+        safe_name = (
+            "".join(
+                character if character.isalnum() or character in {"-", "_"} else "-"
+                for character in audit.repository.name
+            ).strip("-")
+            or "repository"
+        )
+        return Response(
+            package,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="perfora-{safe_name}-{audit.id[:8]}-evidence.zip"'
+                )
+            },
+        )
     exporters = {
         "json": export_json,
         "html": export_html,

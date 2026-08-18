@@ -7,6 +7,7 @@ import httpx
 
 from ..config import Settings
 from ..domain import ModelInfo, ProviderCatalog, ProviderId
+from ..provider_settings import normalize_ollama_base_url
 from .base import ProviderAdapter
 
 
@@ -19,8 +20,9 @@ class OllamaAdapter(ProviderAdapter):
 
     async def catalog(self) -> ProviderCatalog:
         try:
+            base_url, endpoint_locality = normalize_ollama_base_url(self.settings.ollama_base_url)
             async with httpx.AsyncClient(timeout=2) as client:
-                response = await client.get(f"{self.settings.ollama_base_url}/api/tags")
+                response = await client.get(f"{base_url}/api/tags")
                 response.raise_for_status()
             models = [
                 ModelInfo(
@@ -31,7 +33,12 @@ class OllamaAdapter(ProviderAdapter):
                     capability_status=(
                         "unsupported" if "embed" in model_payload["name"].lower() else "unknown"
                     ),
-                    locality="remote" if ":cloud" in model_payload["name"] else "local",
+                    locality=(
+                        "remote"
+                        if endpoint_locality == "remote"
+                        or ":cloud" in model_payload["name"].lower()
+                        else "local"
+                    ),
                     metadata={
                         "size": model_payload.get("size"),
                         "modified_at": model_payload.get("modified_at"),
@@ -44,7 +51,11 @@ class OllamaAdapter(ProviderAdapter):
             return ProviderCatalog(
                 provider=self.id,
                 available=True,
-                detail=f"{len(models)} local model(s)",
+                detail=(
+                    f"{len(models)} local model(s)"
+                    if endpoint_locality == "local"
+                    else f"{len(models)} model(s) at remote Ollama endpoint"
+                ),
                 models=models,
             )
         except (httpx.HTTPError, ValueError, KeyError) as error:

@@ -1,0 +1,17 @@
+{
+  "metadata": {"buildMode": "profile"},
+  "startTime": 0,
+  "endTime": 20000,
+  "nodes": [
+    {
+      "id": 1,
+      "callFrame": {
+        "functionName": "buildDashboard",
+        "url": "lib/dashboard.dart",
+        "lineNumber": 41
+      }
+    },
+    {"id": 2, "callFrame": {"functionName": "idle"}}
+  ],
+  "samples": [1, 1, 1, 1, 1, 1, 1, 1, 2, 2]
+}

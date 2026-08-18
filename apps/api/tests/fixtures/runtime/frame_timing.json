@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "buildMode": "profile",
+    "flutterVersion": "3.35.0",
+    "devToolsVersion": "2.48.0"
+  },
+  "frame_count": 3,
+  "frame_build_times": [5200, 24100, 6100],
+  "frame_rasterizer_times": [4800, 7200, 19500]
+}

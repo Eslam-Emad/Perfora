@@ -13,10 +13,11 @@ deterministic Dart analyzer, enriches confirmed findings with a model selected
 by the user, and can copy a complete finding prompt for handoff to another AI
 agent.
 
-The current `0.3.0` release supports standards-mapped mobile security depth,
-deterministic CLI/CI audits, and OpenCode,
-Ollama, and OpenAI workspace enrichment without silently
-switching providers or models.
+The current `0.5.0` release adds local-first team governance: layered policy
+packs, approved suppressions, ownership routing, portfolio trends, copy-ready
+issue handoffs, and tamper-evident evidence packages. It preserves imported
+Flutter runtime evidence, standards-mapped security depth, deterministic CI,
+and explicit model selection without silently switching providers or models.
 
 ## What works today
 
@@ -58,6 +59,17 @@ switching providers or models.
 - A non-interactive `perfora audit` command with repository policy, include/exclude
   globs, timeouts, Git baselines, new-only gates, stable exit codes, and provider-free
   JSON, HTML, SARIF, and Markdown CI artifacts.
+- Local import of DevTools timelines, CPU profiles, memory snapshots, heap
+  comparisons, frame timings, app-size JSON, and network HAR files.
+- Runtime provenance, profile/debug reliability labels, observed-event findings,
+  source correlation where present, and compatible before/after metric comparison.
+- Layered local organization policy packs with disclosed source files, additive
+  exclusions/suppressions/ownership routes, and cycle-safe inheritance.
+- Approved suppression metadata, severity-based ownership and due-date policy,
+  plus a local portfolio view for current risk, governance gaps, owners, trends,
+  and recurrences.
+- Copy-ready GitHub/Jira/Linear/generic issue content without automatic external
+  creation, and redacted evidence ZIPs with SHA-256 manifests and optional HMAC signing.
 
 ## Quick start
 
@@ -96,10 +108,14 @@ cp .env.example .env.local
 ```
 
 The default configuration works with Ollama at
-`http://127.0.0.1:11434`. To enable OpenAI, set `OPENAI_API_KEY` in
-`.env.local`. Leave it empty when using only OpenCode or Ollama.
+`http://127.0.0.1:11434`. You can add your own OpenAI API key and change the
+Ollama base URL from **Settings** after Perfora starts. Environment variables
+remain available for unattended or preconfigured installations.
 
-`.env.local` is Git-ignored. Do not commit API keys.
+Provider changes made in Settings are written to the Git-ignored `.env.local`
+file with owner-only permissions and take effect immediately. OpenAI keys are
+write-only in the browser: the API reports only whether a key is configured and
+never returns the value. Do not commit API keys.
 
 ### 3. Start Perfora
 
@@ -126,7 +142,7 @@ curl http://127.0.0.1:8765/api/health
 Expected response:
 
 ```json
-{"name":"Perfora","status":"ready","version":"0.3.0"}
+{"name":"Perfora","status":"ready","version":"0.5.0"}
 ```
 
 Use `Ctrl+C` in both terminals to stop the app.
@@ -151,6 +167,8 @@ Copy `.perfora.example.yaml` to `.perfora.yaml` to share rule-pack selection,
 path filters, severity gates, and governed suppressions with the repository.
 See [CLI and CI adoption](docs/ci-adoption.md) for exit codes, baseline behavior,
 monorepo selection, and GitHub/GitLab templates.
+See [team governance](docs/team-governance.md) for shared policy inheritance,
+ownership, suppression approval, portfolio semantics, and evidence packages.
 
 ### 4. Run the first audit
 
@@ -265,6 +283,20 @@ excluded.
 See [the support and coverage matrix](./docs/support-matrix.md) for exact file,
 platform, exclusion, and compatibility boundaries.
 
+## Runtime performance evidence
+
+Open **Runtime evidence**, select a saved repository, and import a supported
+JSON or HAR capture. Record the build mode and available Flutter/DevTools
+versions when the artifact does not contain them. Perfora preserves the
+artifact hash and provenance, shows metrics and linked observed events, and can
+compare two captures from the same repository and artifact family.
+
+Runtime threshold findings require profile mode; release mode is accepted for
+app-size analysis. Debug and unknown-mode artifacts remain inspectable but are
+labeled unreliable or unverified and cannot produce trusted findings. See
+[runtime performance artifacts](./docs/runtime-artifacts.md) for accepted
+structures, thresholds, privacy handling, and comparison boundaries.
+
 ## Agent handoff prompt
 
 Select **Copy prompt** on a finding to copy a complete implementation brief for
@@ -277,6 +309,21 @@ Likely secrets are replaced with `[REDACTED]` before the prompt reaches the
 browser. The receiving agent is instructed to confirm the root cause, preserve
 unrelated changes, avoid broad security bypasses, run focused validation, and
 report its changes and remaining risk.
+
+## Team governance and evidence packages
+
+Open **Portfolio** to review current local risk across audited repositories. The
+current posture uses the newest completed or partial audit for each repository and audit
+type; the trend list uses all retained audits. Governance gaps are concrete
+counts for unassigned high/critical findings, critical findings without due
+dates, overdue work, expired suppressions, and resolved findings still awaiting
+deterministic verification.
+
+**Copy ticket** produces redacted title/body/labels for the user's chosen issue
+system but never contacts it. **Evidence ZIP** exports redacted JSON, HTML,
+SARIF, CycloneDX, and a SHA-256 manifest. Set `PERFORA_REPORT_SIGNING_KEY` only
+when the organization wants an HMAC-SHA256 authenticity signature; the key is
+read from the local environment and is never included in the package.
 
 ## Architecture
 
@@ -318,10 +365,11 @@ The API loads `.env.local` from the repository root.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | empty | Enables OpenAI model discovery and generation |
+| `OPENAI_API_KEY` | empty | Enables OpenAI model discovery and generation; can also be managed from Settings |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
-| `PERFORA_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
+| `PERFORA_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base URL; can also be managed from Settings |
 | `PERFORA_DATABASE_PATH` | `./perfora.db` | SQLite audit database path |
+| `PERFORA_REPORT_SIGNING_KEY` | empty | Optional HMAC key for evidence package authenticity |
 
 The web server binds to `127.0.0.1:5173`; the API binds to
 `127.0.0.1:8765`. These values currently come from the checked-in npm scripts,
@@ -370,8 +418,10 @@ Confirm `dart` is on `PATH`, then install the worker dependencies:
 - OpenCode: confirm `opencode models` returns configured models.
 - Ollama: confirm `curl http://127.0.0.1:11434/api/tags` succeeds and at least
   one non-embedding model is installed.
-- OpenAI: confirm `OPENAI_API_KEY` is present in `.env.local`, then restart the
-  API.
+- OpenAI: open **Settings**, paste your own project API key, and save it. Perfora
+  refreshes provider discovery without an API restart.
+- Ollama: open **Settings** and save the server base URL. Non-loopback URLs are
+  classified as remote and require source-sharing consent when selected.
 
 Use **Refresh health** or **Test connections** after correcting a provider.
 
@@ -384,13 +434,15 @@ must also be available.
 
 ## Current limitations
 
-- Static source analysis only; there is no runtime frame, memory, startup,
-  network, or bundle profiler yet.
+- Runtime evidence is imported from JSON/HAR artifacts; Perfora does not yet
+  guide or automate on-device capture, startup tracing, or retaining-path extraction.
+- Debug-mode runtime artifacts are retained for inspection but cannot produce
+  trusted threshold findings. Profile mode is required, except release app-size data.
 - Only the first deterministic finding receives model enrichment in the current
   tracer.
 - The audit queue is in-process and handles one audit at a time.
 - Native folder browsing is macOS-only; manual absolute paths are available on
   other platforms but are not certified.
 - Model capability filtering is heuristic.
-- Single local user; no authentication, collaboration, hosted deployment, or
-  automatic telemetry.
+- Single local user; team governance is file-based and local. There is no
+  authentication, hosted deployment, direct issue creation, or automatic telemetry.

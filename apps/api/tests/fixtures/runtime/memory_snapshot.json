@@ -1,0 +1,7 @@
+{
+  "metadata": {"buildMode": "profile"},
+  "samples": [
+    {"timestampUs": 1, "heapUsage": 20000000},
+    {"timestampUs": 2, "heapUsage": 45000000}
+  ]
+}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from pathlib import Path
 
 from .analyzer_client import AnalyzerUnavailable, DartAnalyzerClient
@@ -13,10 +13,13 @@ from .domain import (
     AuditEvent,
     AuditRecord,
     Finding,
+    FindingStatusChange,
     ModelEnrichment,
     RepositorySnapshot,
+    TriageStatus,
 )
 from .fingerprints import finding_fingerprint, fingerprint_basis
+from .policy import PolicyError, RepositoryPolicy, load_policy, policy_sources
 from .providers import ProviderRegistry
 from .security import redact_secrets
 from .supply_chain import inventory_dependencies
@@ -131,6 +134,20 @@ class AuditCoordinator:
         audit.scan_coverage = analysis.coverage
         if audit.audit_type.value == "security":
             audit.dependency_inventory = inventory_dependencies(Path(audit.repository.path))
+        try:
+            policy = load_policy(Path(audit.repository.path) / ".perfora.yaml")
+            audit.organization = policy.organization
+            audit.policy_sources = policy_sources(policy)
+        except PolicyError as error:
+            policy = RepositoryPolicy()
+            self._append_event(
+                audit,
+                "policy_warning",
+                "Repository policy could not be applied",
+                50,
+                {"detail": str(error)},
+            )
+        suppressions = {item.fingerprint: item for item in policy.suppress}
         fingerprint_occurrences: dict[str, int] = {}
         for raw in analysis.findings:
             fingerprint_basis = self._fingerprint_basis(raw)
@@ -142,6 +159,37 @@ class AuditCoordinator:
                 fingerprint=self._fingerprint(fingerprint_basis, occurrence),
                 **raw,
             )
+            ownership = finding.model_dump(mode="json")
+            policy.assign_ownership(ownership)
+            finding.owner = ownership["owner"]
+            if ownership["due_at"]:
+                finding.due_at = datetime.fromisoformat(ownership["due_at"]).replace(tzinfo=UTC)
+            suppression = suppressions.get(finding.fingerprint)
+            if suppression and (
+                suppression.expires is None or suppression.expires >= datetime.now(UTC).date()
+            ):
+                finding.triage_status = TriageStatus.RISK_ACCEPTED
+                finding.disposition_reason = suppression.reason
+                finding.suppression_expires_at = (
+                    datetime.combine(suppression.expires, time.max, tzinfo=UTC)
+                    if suppression.expires
+                    else None
+                )
+                finding.suppression_policy_managed = True
+                finding.suppression_approved_by = suppression.approved_by
+                finding.suppression_approved_at = suppression.approved_at
+                finding.suppression_ticket_url = suppression.ticket_url
+                finding.status_history.append(
+                    FindingStatusChange(
+                        from_status=TriageStatus.NEW,
+                        to_status=TriageStatus.RISK_ACCEPTED,
+                        reason=(
+                            f"Approved policy suppression by {suppression.approved_by}"
+                            if suppression.approved_by
+                            else "Repository policy suppression"
+                        ),
+                    )
+                )
             audit.findings.append(finding)
         comparison = self.comparisons.apply_baseline(audit)
         self._append_event(

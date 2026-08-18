@@ -49,6 +49,7 @@ def export_ci_sarif(report: dict) -> str:
                 "ruleVersion": finding["rule_version"],
                 "suppressed": finding.get("suppressed", False),
                 "suppressionExpires": finding.get("suppression_expires"),
+                "suppressionPolicyManaged": finding.get("suppression_policy_managed", False),
                 "controlGroup": finding.get("control_group"),
                 "platforms": finding.get("platforms", []),
                 "standards": finding.get("standards", []),
@@ -173,12 +174,12 @@ letter-spacing:.12em;font-size:12px;font-weight:700}}code{{background:#edf4f1;pa
 border-radius:6px}}.suppressed{{opacity:.68}}table{{border-collapse:collapse}}td,th{{padding:8px 16px;
 border:1px solid #d5dfdc;text-align:left}}
 </style></head><body><header><p class="eyebrow">Perfora deterministic audit</p>
-<h1>{html.escape(report['repository']['name'])}</h1><p>{html.escape(audit_types)} · analyzer-only ·
-{html.escape(report['generated_at'])}</p><table><tr><th>Total</th><th>New</th><th>Unchanged</th>
+<h1>{html.escape(report["repository"]["name"])}</h1><p>{html.escape(audit_types)} · analyzer-only ·
+{html.escape(report["generated_at"])}</p><table><tr><th>Total</th><th>New</th><th>Unchanged</th>
 <th>Resolved</th><th>Suppressed</th><th>Policy violations</th></tr><tr>
-<td>{summary['total']}</td><td>{summary['new']}</td><td>{summary['unchanged']}</td>
-<td>{summary['resolved']}</td><td>{summary['suppressed']}</td><td>{summary['policy_violations']}</td>
-</tr></table></header>{rows or '<p>No findings detected.</p>'}</body></html>"""
+<td>{summary["total"]}</td><td>{summary["new"]}</td><td>{summary["unchanged"]}</td>
+<td>{summary["resolved"]}</td><td>{summary["suppressed"]}</td><td>{summary["policy_violations"]}</td>
+</tr></table></header>{rows or "<p>No findings detected.</p>"}</body></html>"""
 
 
 def export_ci_markdown(report: dict) -> str:
@@ -204,16 +205,14 @@ def export_ci_markdown(report: dict) -> str:
     for finding in report["findings"][:20]:
         state = "suppressed" if finding.get("suppressed") else finding["baseline_status"]
         location = f"`{finding['file']}:{finding['line']}`"
-        lines.append(
-            f"| {finding['severity']} | {state} | `{finding['rule_id']}` | {location} |"
-        )
+        lines.append(f"| {finding['severity']} | {state} | `{finding['rule_id']}` | {location} |")
     if len(report["findings"]) > 20:
         lines.extend(["", f"_Showing 20 of {len(report['findings'])} findings._"])
     return "\n".join(lines) + "\n"
 
 
 def _finding_html(finding: dict) -> str:
-    css_class = " class=\"suppressed\"" if finding.get("suppressed") else ""
+    css_class = ' class="suppressed"' if finding.get("suppressed") else ""
     evidence = "".join(f"<li>{html.escape(item)}</li>" for item in finding["evidence"])
     suppression = ""
     if finding.get("suppressed"):
@@ -221,11 +220,11 @@ def _finding_html(finding: dict) -> str:
             f"<p><strong>Suppressed:</strong> {html.escape(finding['suppression_reason'])} "
             f"(expires {html.escape(finding['suppression_expires'] or 'never')})</p>"
         )
-    return f"""<article{css_class}><p class="eyebrow">{html.escape(finding['audit_type'])} ·
-{html.escape(finding['severity'])} · {html.escape(finding['baseline_status'])}</p>
-<h2>{html.escape(finding['title'])}</h2><p><code>{html.escape(finding['file'])}:{finding['line']}</code></p>
-<p>{html.escape(finding['explanation'])}</p><h3>Evidence</h3><ul>{evidence}</ul>
-<h3>Recommendation</h3><p>{html.escape(finding['recommendation'])}</p>{suppression}</article>"""
+    return f"""<article{css_class}><p class="eyebrow">{html.escape(finding["audit_type"])} ·
+{html.escape(finding["severity"])} · {html.escape(finding["baseline_status"])}</p>
+<h2>{html.escape(finding["title"])}</h2><p><code>{html.escape(finding["file"])}:{finding["line"]}</code></p>
+<p>{html.escape(finding["explanation"])}</p><h3>Evidence</h3><ul>{evidence}</ul>
+<h3>Recommendation</h3><p>{html.escape(finding["recommendation"])}</p>{suppression}</article>"""
 
 
 def render_ci_report(report: dict, output_format: str) -> str:

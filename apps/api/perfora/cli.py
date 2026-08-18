@@ -17,7 +17,7 @@ from .ci_report import export_ci_markdown, render_ci_report
 from .config import settings
 from .domain import AnalyzerResult, AuditType, DependencyInventory
 from .fingerprints import assign_fingerprints
-from .policy import PolicyError, RepositoryPolicy, Severity, load_policy
+from .policy import PolicyError, RepositoryPolicy, Severity, load_policy, policy_sources
 from .repositories import inspect_repository
 from .supply_chain import compare_dependencies, inventory_dependencies
 
@@ -78,7 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
     new_only = audit.add_mutually_exclusive_group()
     new_only.add_argument("--new-only", action="store_true", default=None)
     new_only.add_argument("--all-findings", action="store_false", dest="new_only")
-    audit.add_argument("--timeout", type=float, default=120, help="Seconds allowed per analyzer run")
+    audit.add_argument(
+        "--timeout", type=float, default=120, help="Seconds allowed per analyzer run"
+    )
     audit.add_argument(
         "--deterministic-only",
         action="store_true",
@@ -123,12 +125,12 @@ async def _run_audit(args: argparse.Namespace) -> int:
     if not snapshot.valid:
         raise PolicyError(snapshot.detail)
     policy_path = (
-        Path(args.config).expanduser().resolve()
-        if args.config
-        else repository / ".perfora.yaml"
+        Path(args.config).expanduser().resolve() if args.config else repository / ".perfora.yaml"
     )
     policy = load_policy(policy_path)
-    audit_types = [AuditType(item) for item in args.audit_types] if args.audit_types else policy.audit.types
+    audit_types = (
+        [AuditType(item) for item in args.audit_types] if args.audit_types else policy.audit.types
+    )
     include_paths = args.include if args.include is not None else policy.include
     exclude_paths = [*policy.exclude, *(args.exclude or [])]
     severity, only_new = _gate(args, policy)
@@ -262,6 +264,14 @@ def _build_report(
         finding["suppression_expires"] = (
             suppression.expires.isoformat() if active and suppression.expires else None
         )
+        finding["suppression_policy_managed"] = active
+        finding["suppression_approved_by"] = suppression.approved_by if active else None
+        finding["suppression_approved_at"] = (
+            suppression.approved_at.isoformat() if active and suppression.approved_at else None
+        )
+        finding["suppression_ticket_url"] = suppression.ticket_url if active else None
+        policy.assign_ownership(finding)
+        finding["governance_violations"] = policy.governance_violations(finding)
 
     resolved = []
     for finding in baseline_findings:
@@ -274,6 +284,13 @@ def _build_report(
                     "suppressed": False,
                     "suppression_reason": None,
                     "suppression_expires": None,
+                    "suppression_policy_managed": False,
+                    "suppression_approved_by": None,
+                    "suppression_approved_at": None,
+                    "suppression_ticket_url": None,
+                    "owner": None,
+                    "due_at": None,
+                    "governance_violations": [],
                 }
             )
 
@@ -285,6 +302,12 @@ def _build_report(
         and _SEVERITY_ORDER[finding["severity"]] >= _SEVERITY_ORDER[severity]
         and (not only_new or finding["baseline_status"] == "new")
     ]
+    governance_violations = [
+        finding for finding in current_findings if finding["governance_violations"]
+    ]
+    violating_fingerprints = {
+        finding["fingerprint"] for finding in [*violations, *governance_violations]
+    }
     commit = _git_output(repository, ["rev-parse", "HEAD"], required=False)
     analyses = [
         {
@@ -310,6 +333,8 @@ def _build_report(
         "audit_types": [item.value for item, _ in current],
         "policy": {
             "config": str(config_path) if config_path else None,
+            "sources": policy_sources(policy),
+            "organization": policy.organization,
             "severity": severity,
             "only_new": only_new,
             "include": include_paths,
@@ -321,12 +346,12 @@ def _build_report(
         "summary": {
             "total": len(current_findings),
             "new": sum(item["baseline_status"] == "new" for item in current_findings),
-            "unchanged": sum(
-                item["baseline_status"] == "unchanged" for item in current_findings
-            ),
+            "unchanged": sum(item["baseline_status"] == "unchanged" for item in current_findings),
             "resolved": len(resolved),
             "suppressed": sum(item["suppressed"] for item in current_findings),
-            "policy_violations": len(violations),
+            "policy_violations": len(violating_fingerprints),
+            "severity_violations": len(violations),
+            "governance_violations": len(governance_violations),
         },
         "findings": current_findings,
         "resolved_findings": resolved,

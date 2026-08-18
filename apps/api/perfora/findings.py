@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from .database import AuditStore
 from .domain import (
@@ -12,6 +13,7 @@ from .domain import (
     FindingUpdate,
     TriageStatus,
 )
+from .policy import PolicyError, RepositoryPolicy, load_policy
 
 
 class FindingUpdateError(ValueError):
@@ -42,19 +44,43 @@ class FindingService:
             raise FindingUpdateError(
                 "Verified resolved is assigned only by a deterministic re-scan"
             )
+        try:
+            policy = load_policy(Path(audit.repository.path) / ".perfora.yaml")
+        except PolicyError:
+            policy = RepositoryPolicy()
+        if (
+            "triage_status" in fields
+            and target_status == TriageStatus.RISK_ACCEPTED
+            and policy.suppressions.require_approval
+        ):
+            raise FindingUpdateError(
+                "Risk acceptance requires an approved suppression in the repository policy pack"
+            )
 
         disposition_reason = (
             self._clean(request.disposition_reason)
             if "disposition_reason" in fields
             else finding.disposition_reason
         )
-        if target_status in {
-            TriageStatus.FALSE_POSITIVE,
-            TriageStatus.RISK_ACCEPTED,
-        } and not disposition_reason:
+        if (
+            target_status
+            in {
+                TriageStatus.FALSE_POSITIVE,
+                TriageStatus.RISK_ACCEPTED,
+            }
+            and not disposition_reason
+        ):
             raise FindingUpdateError(
                 "A disposition reason is required for false positive or risk accepted"
             )
+
+        owner = self._clean(request.owner) if "owner" in fields else finding.owner
+        due_at = request.due_at if "due_at" in fields else finding.due_at
+        if target_status == TriageStatus.RESOLVED:
+            if finding.severity in policy.ownership.require_owner_for and not owner:
+                raise FindingUpdateError("An owner is required before resolving this finding")
+            if finding.severity in policy.ownership.require_due_date_for and not due_at:
+                raise FindingUpdateError("A due date is required before resolving this finding")
 
         suppression_expires_at = (
             request.suppression_expires_at

@@ -1,6 +1,6 @@
 # CLI and CI adoption
 
-Perfora 0.2 runs security and lifecycle-performance rule packs without starting
+Perfora 0.5 runs security and lifecycle-performance rule packs without starting
 the API, browser, or any model provider. The CLI sends no source or finding data
 to OpenCode, Ollama, OpenAI, or another network service.
 
@@ -48,7 +48,9 @@ baseline, current findings are treated as new so a new-only policy remains safe.
 Start with `.perfora.example.yaml`:
 
 ```yaml
-version: 1
+version: 2
+extends: [../security-policy/mobile.yaml]
+organization: Example mobile engineering
 audit:
   types: [security, performance]
 policy:
@@ -63,13 +65,29 @@ exclude:
 suppressions:
   require_reason: true
   require_expiry: true
+  require_approval: true
+ownership:
+  require_owner_for: [high, critical]
+  require_due_date_for: [critical]
+  routes:
+    - owner: Application security
+      control_groups: [MASVS-NETWORK]
+      due_days: 14
 suppress: []
 ```
 
 Configuration is strict: misspelled or undocumented fields fail with exit code
-`2`. Suppressions use the emitted `sha256:` fingerprint. By default each entry
-must have a reason and expiry date. An expired suppression remains visible in
-the report and no longer bypasses the gate.
+`2`. Policy packs referenced by `extends` must be local files; cycles and remote
+URLs fail closed. Exclusions, suppressions, ownership requirements/routes, and
+audit types are additive. Suppression requirements cannot be weakened and a
+child severity gate can only become stricter. Every loaded source is disclosed
+in JSON output. Suppressions use the emitted `sha256:` fingerprint.
+When approval is required, each entry also needs `approved_by` and `approved_at`.
+An expired suppression remains visible and no longer bypasses the gate.
+
+The first matching ownership route assigns the finding. Missing required owners
+or due dates are governance violations and contribute to the same stable policy
+exit code as severity violations.
 
 ## Exit codes
 

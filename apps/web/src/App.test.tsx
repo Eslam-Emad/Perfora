@@ -1,7 +1,12 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { AuditRecord, Finding, VerificationAttempt } from "./types";
+import type {
+  AuditRecord,
+  Finding,
+  ProviderSettingsSnapshot,
+  VerificationAttempt,
+} from "./types";
 
 const flutterProject = {
   path: "/Users/islam/projects/sample_flutter",
@@ -74,6 +79,7 @@ beforeEach(() => {
       const path = String(input);
       if (path.endsWith("/api/setup")) return jsonResponse(setup);
       if (path.endsWith("/api/repositories/validate")) return jsonResponse(flutterProject);
+      if (path.includes("/api/runtime-captures")) return jsonResponse({ captures: [] });
       return jsonResponse({ audits: [] });
     }),
   );
@@ -86,6 +92,184 @@ describe("Perfora shell", () => {
     expect(screen.getAllByText("Perfora")).toHaveLength(2);
     expect(screen.getByText("Make the invisible setup visible.")).toBeInTheDocument();
     expect(screen.getByText("localhost only")).toBeInTheDocument();
+  });
+
+  it("lets the user configure OpenAI and Ollama without reading the saved key back", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    let providerSettings: ProviderSettingsSnapshot = {
+      openai: { configured: false, source: "none" },
+      ollama: {
+        base_url: "http://127.0.0.1:11434",
+        source: "default",
+        locality: "local",
+      },
+    };
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      const path = String(input);
+      if (path.endsWith("/api/setup")) return jsonResponse(setup);
+      if (path.endsWith("/api/settings/providers") && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        requests.push(body);
+        if (body.openai_api_key) {
+          providerSettings = {
+            ...providerSettings,
+            openai: { configured: true, source: "settings" },
+          };
+        }
+        if (body.ollama_base_url) {
+          providerSettings = {
+            ...providerSettings,
+            ollama: {
+              base_url: String(body.ollama_base_url),
+              source: "settings",
+              locality: "remote",
+            },
+          };
+        }
+        return jsonResponse({ settings: providerSettings, providers: setup.providers });
+      }
+      if (path.endsWith("/api/settings/providers")) return jsonResponse(providerSettings);
+      return jsonResponse({ audits: [] });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    const keyInput = await screen.findByLabelText("OpenAI API key");
+    expect(keyInput).toHaveAttribute("type", "password");
+    fireEvent.change(keyInput, { target: { value: "sk-test-ui-owned-key-0123456789" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save OpenAI key" }));
+
+    await waitFor(() => expect(requests[0]).toEqual({ openai_api_key: "sk-test-ui-owned-key-0123456789" }));
+    expect(keyInput).toHaveValue("");
+    expect(screen.queryByText("sk-test-ui-owned-key-0123456789")).not.toBeInTheDocument();
+    expect(screen.getByText("OpenAI key saved. Provider availability has been refreshed.")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Ollama base URL"), {
+      target: { value: "https://ollama.example.test:11434" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Ollama endpoint" }));
+
+    await waitFor(() => expect(requests[1]).toEqual({ ollama_base_url: "https://ollama.example.test:11434" }));
+    expect(screen.getByText(/This endpoint is remote/)).toBeInTheDocument();
+  });
+
+  it("renders imported runtime evidence with provenance and trace references", async () => {
+    const now = new Date().toISOString();
+    const capture = {
+      id: "runtime-1",
+      record_version: 1,
+      repository: flutterProject,
+      label: "Checkout scroll — profile",
+      kind: "frame_timing",
+      reliability: "trusted",
+      provenance: {
+        filename: "scrolling_timeline.json",
+        sha256: `sha256:${"a".repeat(64)}`,
+        artifact_format: "Flutter TimelineSummary JSON",
+        build_mode: "profile",
+        build_mode_source: "artifact",
+        flutter_version: "3.35.0",
+        devtools_version: "2.48.0",
+        imported_at: now,
+      },
+      metrics: { frame_count: 54, janky_frame_count: 2, worst_frame_build_time_ms: 21 },
+      metric_units: { frame_count: "count", janky_frame_count: "count", worst_frame_build_time_ms: "ms" },
+      breakdowns: {},
+      evidence: [{
+        id: "evidence:frame-1",
+        kind: "frame",
+        name: "UI frame",
+        trace_reference: "$.frame_build_times[7]",
+        duration_us: 21000,
+        value: 21,
+        unit: "ms",
+        details: { budget_ms: 16.67 },
+      }],
+      findings: [{
+        id: "runtime-finding-1",
+        rule_id: "runtime.frame.jank",
+        rule_version: "1.0.0",
+        title: "Observed frames exceeded the 60 Hz frame budget",
+        severity: "medium",
+        confidence: 0.98,
+        explanation: "The imported frame timing artifact contains UI work longer than 16.67 ms.",
+        recommendation: "Inspect the linked frame in DevTools.",
+        evidence_ids: ["evidence:frame-1"],
+        observed: true,
+      }],
+      warnings: [],
+      created_at: now,
+    };
+    vi.mocked(fetch).mockImplementation((input) => {
+      const path = String(input);
+      if (path.endsWith("/api/setup")) return jsonResponse(setup);
+      if (path.includes("/api/runtime-captures")) return jsonResponse({ captures: [capture] });
+      return jsonResponse({ audits: [] });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Runtime evidence" }));
+
+    expect(await screen.findByText("Import real Flutter runtime evidence.")).toBeInTheDocument();
+    expect(screen.getAllByText("Checkout scroll — profile").length).toBeGreaterThan(0);
+    expect(screen.getByText("Flutter TimelineSummary JSON · scrolling_timeline.json")).toBeInTheDocument();
+    expect(screen.getByText("Observed frames exceeded the 60 Hz frame budget")).toBeInTheDocument();
+    expect(screen.getByText("$.frame_build_times[7]")).toBeInTheDocument();
+    expect(screen.getByText(/never an invented overall performance score/i)).toBeInTheDocument();
+  });
+
+  it("renders local portfolio governance and recurrence evidence", async () => {
+    vi.mocked(fetch).mockImplementation((input) => {
+      const path = String(input);
+      if (path.endsWith("/api/setup")) return jsonResponse(setup);
+      if (path.endsWith("/api/portfolio")) return jsonResponse({
+        generated_at: new Date().toISOString(),
+        scope: "latest local audit per repository and audit type",
+        totals: {
+          repositories: 1,
+          audits: 4,
+          open_findings: 3,
+          high_or_critical: 2,
+          verified_resolved: 5,
+          recurrences: 1,
+          governance_issues: 2,
+        },
+        repositories: [{
+          path: flutterProject.path,
+          name: flutterProject.name,
+          latest_audit_at: new Date().toISOString(),
+          audit_count: 4,
+          open_findings: 3,
+          high_or_critical: 2,
+          verified_resolved: 5,
+          recurrences: 1,
+          governance_issues: 2,
+          governance: { unassigned_high_or_critical: 1, resolved_not_verified: 1 },
+        }],
+        owners: [{ owner: "Application security", open: 2, overdue: 1 }],
+        trends: [{
+          audit_id: "audit-4",
+          repository: flutterProject.name,
+          audit_type: "security",
+          created_at: new Date().toISOString(),
+          total: 3,
+          new: 1,
+          regressed: 1,
+          verified_resolved: 0,
+        }],
+      });
+      return jsonResponse({ audits: [] });
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Portfolio" }));
+
+    expect(await screen.findByText("Govern risk across repositories.")).toBeInTheDocument();
+    expect(screen.getByText("Application security")).toBeInTheDocument();
+    expect(screen.getByText(/4 audits/)).toBeInTheDocument();
+    expect(screen.getByText("3 total · 1 regressed")).toBeInTheDocument();
+    expect(screen.getByText(/No account or external issue system is contacted/)).toBeInTheDocument();
   });
 
   it("saves a static project path and requires an explicit model choice", async () => {
@@ -272,6 +456,18 @@ describe("Perfora shell", () => {
           generated_at: new Date().toISOString(),
         });
       }
+      if (requestPath.includes("/ticket-handoff?system=generic")) {
+        return jsonResponse({
+          system: "generic",
+          title: "[Perfora][HIGH] Cleartext HTTP endpoint is embedded in source",
+          body: "## Perfora finding\nComplete redacted ticket body",
+          labels: ["perfora", "high", "security"],
+          finding_id: audit.findings[0].id,
+          audit_id: audit.id,
+          redacted: true,
+          automatic_creation: false,
+        });
+      }
       if (requestPath.endsWith("/comparison")) {
         return jsonResponse({
           current_audit_id: audit.id,
@@ -324,7 +520,17 @@ describe("Perfora shell", () => {
       "href",
       "/api/audits/security-audit/export?format=cyclonedx",
     );
+    expect(screen.getByRole("link", { name: "Evidence ZIP" })).toHaveAttribute(
+      "href",
+      "/api/audits/security-audit/export?format=evidence",
+    );
     expect(screen.getByText("Baseline comparison")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy ticket" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+      "[Perfora][HIGH] Cleartext HTTP endpoint is embedded in source\n\n## Perfora finding\nComplete redacted ticket body\n\nLabels: perfora, high, security",
+    ));
+    expect(screen.getByRole("button", { name: "Ticket copied" })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Triage status"), { target: { value: "risk_accepted" } });
     fireEvent.change(screen.getByLabelText("Finding owner"), { target: { value: "Security team" } });

@@ -19,6 +19,7 @@ import {
   HardDrive,
   KeyRound,
   Layers3,
+  LayoutDashboard,
   LoaderCircle,
   LockKeyhole,
   Play,
@@ -30,6 +31,7 @@ import {
   Sparkles,
   TerminalSquare,
   Wrench,
+  Upload,
   X,
   Zap,
 } from "lucide-react";
@@ -44,12 +46,18 @@ import type {
   ModelInfo,
   ProviderCatalog,
   ProviderId,
+  ProviderSettingsSnapshot,
   RepositorySnapshot,
+  RuntimeArtifactKind,
+  RuntimeBuildMode,
+  RuntimeCapture,
+  RuntimeCaptureComparison,
   SetupStatus,
   TriageStatus,
+  PortfolioSummary,
 } from "./types";
 
-type View = "setup" | "repositories" | "new-audit" | "workspace" | "settings";
+type View = "setup" | "repositories" | "new-audit" | "workspace" | "portfolio" | "runtime" | "settings";
 type PickerIssue = { source: "saved" | "path"; message: string };
 
 const PROJECTS_STORAGE_KEY = "perfora.projects";
@@ -233,6 +241,14 @@ function App() {
               onNewAudit={() => setView("new-audit")}
             />
           )}
+          {view === "portfolio" && <PortfolioView />}
+          {view === "runtime" && (
+            <RuntimeEvidenceView
+              repository={repository}
+              projects={projects}
+              onSelectRepository={saveProject}
+            />
+          )}
           {view === "settings" && (
             <SettingsView setup={setup} onRefresh={refreshSetup} />
           )}
@@ -248,6 +264,8 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
     { id: "repositories" as const, label: "Repositories", icon: FolderGit2 },
     { id: "new-audit" as const, label: "New audit", icon: Sparkles },
     { id: "workspace" as const, label: "Audit workspace", icon: SearchCode },
+    { id: "portfolio" as const, label: "Portfolio", icon: LayoutDashboard },
+    { id: "runtime" as const, label: "Runtime evidence", icon: Activity },
   ];
   return (
     <aside className="sidebar">
@@ -289,7 +307,7 @@ function Sidebar({ view, onNavigate }: { view: View; onNavigate: (view: View) =>
         <Settings size={18} /> Settings
       </button>
       <div className="sidebar-footer">
-        <span>v0.3 security depth</span><span className="status-dot" /> localhost
+        <span>v0.5 team governance</span><span className="status-dot" /> localhost
       </div>
     </aside>
   );
@@ -301,6 +319,8 @@ function Topbar({ view, setup }: { view: View; setup: SetupStatus | null }) {
     repositories: "Repositories",
     "new-audit": "Create audit",
     workspace: "Audit workspace",
+    portfolio: "Portfolio governance",
+    runtime: "Runtime evidence",
     settings: "Settings",
   };
   const readyProviders = setup?.providers.filter((provider) => provider.available).length ?? 0;
@@ -936,6 +956,7 @@ function AuditWorkspace({
         <Metric label="Run status" displayValue={audit.status} icon={Activity} />
       </div>
       {audit.error && <Notice tone={audit.status === "partial" ? "warning" : "danger"} title={audit.status === "partial" ? "Partial audit" : "Audit failed"}>{audit.error}</Notice>}
+      {(audit.organization || audit.policy_sources?.length) && <div className="context-manifest policy-manifest"><ShieldCheck size={16} /><span><strong>Governance policy:</strong> {audit.organization || "Repository policy"}. Sources: {audit.policy_sources?.map((source) => source.split("/").at(-1)).join(" → ") || "default policy"}.</span></div>}
       {audit.scan_coverage && <div className="context-manifest coverage-manifest"><SearchCode size={16} /><span><strong>Scan coverage:</strong> discovered {audit.scan_coverage.files_discovered}, scanned {audit.scan_coverage.files_scanned}, skipped {audit.scan_coverage.files_skipped}. Scanned types: {scannedCoverage || "none"}. Skip reasons: {skippedCoverage || "none"}. Rules executed: {audit.scan_coverage.rules_executed.length}. Analyzer {audit.analyzer_version ?? "unknown"}.</span></div>}
       {auditType === "security" && <div className="security-depth-summary"><div><p className="eyebrow">Standards coverage</p><strong>{platformCoverage || "No platform files scanned"}</strong><span>{controlCoverage || "No mapped control groups executed"}</span></div><div><p className="eyebrow">Dependency inventory</p><strong>{audit.dependency_inventory?.components.length ?? 0} components · {audit.dependency_inventory?.manifests.length ?? 0} manifests</strong><span>{dependencyCoverage || "No supported dependency manifests"}{privacyCoverage ? ` · Privacy-sensitive SDKs: ${privacyCoverage}` : ""}</span></div><div><p className="eyebrow">Vulnerability matching</p><strong>Not requested</strong><span>Local inventory only; no dependency data was sent to an online service.</span></div></div>}
       {["completed", "partial"].includes(audit.status) && (
@@ -975,6 +996,7 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
   const [verificationLoading, setVerificationLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [ticketCopied, setTicketCopied] = useState(false);
   const [saved, setSaved] = useState(false);
   const [triageStatus, setTriageStatus] = useState<TriageStatus>(finding.triage_status ?? "new");
   const [owner, setOwner] = useState(finding.owner ?? "");
@@ -985,7 +1007,7 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
   const [ticketUrl, setTicketUrl] = useState(finding.ticket_url ?? "");
   const [note, setNote] = useState("");
   useEffect(() => {
-    setCopied(false); setSaved(false); setError(""); setNote("");
+    setCopied(false); setTicketCopied(false); setSaved(false); setError(""); setNote("");
     setTriageStatus(finding.triage_status ?? "new"); setOwner(finding.owner ?? "");
     setDueAt(dateInputValue(finding.due_at)); setResolutionCommit(finding.resolution_commit ?? "");
     setDispositionReason(finding.disposition_reason ?? "");
@@ -1001,6 +1023,19 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
     } catch (reason) {
       setCopied(false);
       setError(reason instanceof Error ? reason.message : "Prompt copy failed");
+    } finally {
+      setPromptLoading(false);
+    }
+  };
+  const copyTicket = async () => {
+    setPromptLoading(true); setError("");
+    try {
+      const result = await api.buildTicketHandoff(audit.id, finding.id);
+      await writeClipboard(`${result.title}\n\n${result.body}\n\nLabels: ${result.labels.join(", ")}`);
+      setTicketCopied(true);
+    } catch (reason) {
+      setTicketCopied(false);
+      setError(reason instanceof Error ? reason.message : "Ticket handoff copy failed");
     } finally {
       setPromptLoading(false);
     }
@@ -1044,7 +1079,7 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
     && ["resolved", "verified_resolved"].includes(finding.triage_status ?? "new");
   return (
     <>
-      <div className="detail-heading"><div><div className="finding-tags"><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><span className="confirmed-pill"><ShieldCheck size={13} /> {finding.status}</span><span>{finding.framework}</span><span className={`triage-pill ${finding.triage_status ?? "new"}`}>{readableStatus(finding.triage_status ?? "new")}</span></div><h2>{finding.title}</h2><code>{finding.file}:{finding.line} · {finding.symbol}</code></div><button className="button primary" onClick={copyPrompt} disabled={promptLoading}>{promptLoading ? <LoaderCircle className="spin" /> : copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy prompt"}</button></div>
+      <div className="detail-heading"><div><div className="finding-tags"><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><span className="confirmed-pill"><ShieldCheck size={13} /> {finding.status}</span><span>{finding.framework}</span><span className={`triage-pill ${finding.triage_status ?? "new"}`}>{readableStatus(finding.triage_status ?? "new")}</span></div><h2>{finding.title}</h2><code>{finding.file}:{finding.line} · {finding.symbol}</code></div><div className="detail-actions"><button className="button secondary" onClick={() => void copyTicket()} disabled={promptLoading}>{ticketCopied ? <Check /> : <Copy />} {ticketCopied ? "Ticket copied" : "Copy ticket"}</button><button className="button primary" onClick={copyPrompt} disabled={promptLoading}>{promptLoading ? <LoaderCircle className="spin" /> : copied ? <Check /> : <Copy />} {copied ? "Copied" : "Copy prompt"}</button></div></div>
       <div className="triage-panel">
         <div className="triage-heading"><div><p className="eyebrow">Finding lifecycle</p><h3>Assign, decide, and document</h3></div><button className="button secondary" onClick={() => void saveTriage()} disabled={saving}>{saving ? <LoaderCircle className="spin" /> : saved ? <Check /> : <ShieldCheck />} {saved ? "Saved" : "Save triage"}</button></div>
         <div className="triage-grid">
@@ -1057,6 +1092,7 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
           <label className="wide">Disposition reason<textarea aria-label="Disposition reason" value={dispositionReason} onChange={(event) => setDispositionReason(event.target.value)} placeholder="Required for false positive and risk accepted" /></label>
           <label className="wide">Add note<textarea aria-label="Finding note" value={note} onChange={(event) => setNote(event.target.value)} placeholder="Append context without replacing prior notes" /></label>
         </div>
+        {finding.suppression_approved_by && <div className="context-manifest suppression-approval"><ShieldCheck size={15} /><span><strong>Approved suppression:</strong> {finding.suppression_approved_by} · {finding.suppression_approved_at || "approval date not recorded"}{finding.suppression_ticket_url ? ` · ${finding.suppression_ticket_url}` : ""}</span></div>}
         {(finding.notes?.length > 0 || finding.status_history?.length > 0) && <div className="triage-history"><p className="eyebrow">History</p>{finding.status_history?.map((change) => <div key={`${change.changed_at}-${change.to_status}`}><Clock3 size={14} /><span><strong>{readableStatus(change.from_status)} → {readableStatus(change.to_status)}</strong><small>{new Date(change.changed_at).toLocaleString()}{change.reason ? ` · ${change.reason}` : ""}</small></span></div>)}{finding.notes?.map((entry) => <div key={entry.id}><Code2 size={14} /><span><strong>Note</strong><small>{entry.body} · {new Date(entry.created_at).toLocaleString()}</small></span></div>)}</div>}
       </div>
       <div className="verification-panel">
@@ -1080,12 +1116,320 @@ function FindingDetail({ finding, audit, onRefresh }: { finding: Finding; audit:
   );
 }
 
+function PortfolioView() {
+  const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    setLoading(true); setError("");
+    try {
+      setPortfolio(await api.portfolio());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Portfolio could not be loaded");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => { void refresh(); }, [refresh]);
+  const totals = portfolio?.totals;
+  const trendMax = Math.max(1, ...(portfolio?.trends.map((item) => item.total) ?? [1]));
+  return (
+    <section className="page portfolio-page">
+      <PageHeading
+        eyebrow="Local organization view"
+        title="Govern risk across repositories."
+        description="Portfolio metrics are derived from persisted local evidence. The latest audit per repository and audit type drives current risk; history remains visible for recurrence trends."
+        action={<button className="button secondary" onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} /> Refresh portfolio</button>}
+      />
+      {error && <Notice tone="danger" title="Portfolio unavailable">{error}</Notice>}
+      <div className="portfolio-metrics">
+        <Metric label="Repositories" displayValue={String(totals?.repositories ?? 0)} icon={FolderGit2} />
+        <Metric label="Open findings" displayValue={String(totals?.open_findings ?? 0)} icon={SearchCode} />
+        <Metric label="High or critical" displayValue={String(totals?.high_or_critical ?? 0)} icon={Zap} />
+        <Metric label="Verified resolved" displayValue={String(totals?.verified_resolved ?? 0)} icon={ShieldCheck} />
+        <Metric label="Recurrences" displayValue={String(totals?.recurrences ?? 0)} icon={RefreshCw} />
+        <Metric label="Governance issues" displayValue={String(totals?.governance_issues ?? 0)} icon={CircleAlert} />
+      </div>
+      {!loading && portfolio?.repositories.length === 0 ? <EmptyState icon={LayoutDashboard} title="No portfolio evidence yet" description="Complete an audit to establish the first repository risk snapshot." /> : <div className="portfolio-layout">
+        <div className="portfolio-main">
+          <div className="portfolio-card">
+            <div className="panel-heading"><div><p className="eyebrow">Repository posture</p><h2>Latest local evidence</h2></div><span>{portfolio?.repositories.length ?? 0}</span></div>
+            <div className="portfolio-table"><div className="portfolio-table-head"><span>Repository</span><span>Open</span><span>High+</span><span>Verified</span><span>Recurrence</span><span>Governance</span></div>{portfolio?.repositories.map((item) => <div className="portfolio-table-row" key={item.path}><span><strong>{item.name}</strong><small>{item.audit_count} audits · {new Date(item.latest_audit_at).toLocaleString()}</small><code>{item.path}</code></span><b>{item.open_findings}</b><b>{item.high_or_critical}</b><b>{item.verified_resolved}</b><b className={item.recurrences ? "risk-number" : ""}>{item.recurrences}</b><b className={item.governance_issues ? "risk-number" : ""}>{item.governance_issues}</b></div>)}</div>
+          </div>
+          <div className="portfolio-card">
+            <div className="panel-heading"><div><p className="eyebrow">Trend and recurrence</p><h2>Audit history</h2></div><span>{portfolio?.trends.length ?? 0}</span></div>
+            <div className="portfolio-trends">{portfolio?.trends.slice(-12).map((item) => <div key={item.audit_id}><span><strong>{item.repository}</strong><small>{item.audit_type} · {new Date(item.created_at).toLocaleDateString()}</small></span><div className="trend-track"><i style={{ width: `${(item.total / trendMax) * 100}%` }} /><em style={{ width: `${(item.regressed / trendMax) * 100}%` }} /></div><b>{item.total} total · {item.regressed} regressed</b></div>)}</div>
+          </div>
+        </div>
+        <aside className="portfolio-card owner-card">
+          <div className="panel-heading"><div><p className="eyebrow">Team ownership</p><h2>Open queue</h2></div><span>{portfolio?.owners.length ?? 0}</span></div>
+          {portfolio?.owners.map((item) => <div className="owner-row" key={item.owner}><span className={item.owner === "Unassigned" ? "owner-avatar unassigned" : "owner-avatar"}>{item.owner.slice(0, 2).toUpperCase()}</span><div><strong>{item.owner}</strong><small>{item.open} open · {item.overdue} overdue</small></div><b>{item.open}</b></div>)}
+          <div className="portfolio-scope"><LockKeyhole size={15} /><span><strong>Local scope</strong>{portfolio?.scope ?? "No hosted history"}. No account or external issue system is contacted.</span></div>
+        </aside>
+      </div>}
+    </section>
+  );
+}
+
+const runtimeKindLabels: Record<RuntimeArtifactKind, string> = {
+  auto: "Detect automatically",
+  timeline: "DevTools timeline",
+  cpu_profile: "CPU profile",
+  memory_snapshot: "Memory snapshot",
+  heap_comparison: "Heap comparison",
+  app_size: "App-size analysis",
+  frame_timing: "Frame timings",
+  network_trace: "Network HAR",
+};
+
+function RuntimeEvidenceView({
+  repository,
+  projects,
+  onSelectRepository,
+}: {
+  repository: RepositorySnapshot | null;
+  projects: RepositorySnapshot[];
+  onSelectRepository: (repository: RepositorySnapshot) => void;
+}) {
+  const [captures, setCaptures] = useState<RuntimeCapture[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [kind, setKind] = useState<RuntimeArtifactKind>("auto");
+  const [buildMode, setBuildMode] = useState<RuntimeBuildMode>("profile");
+  const [flutterVersion, setFlutterVersion] = useState("");
+  const [devtoolsVersion, setDevtoolsVersion] = useState("");
+  const [label, setLabel] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [baselineId, setBaselineId] = useState("");
+  const [comparison, setComparison] = useState<RuntimeCaptureComparison | null>(null);
+
+  const refresh = useCallback(async () => {
+    setError("");
+    try {
+      const result = await api.listRuntimeCaptures(repository?.path);
+      setCaptures(result);
+      setSelectedId((current) => current && result.some((item) => item.id === current)
+        ? current
+        : result[0]?.id ?? "");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Runtime captures could not be loaded");
+    }
+  }, [repository?.path]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+  const selected = captures.find((capture) => capture.id === selectedId) ?? captures[0];
+  const compatibleBaselines = captures.filter((capture) =>
+    selected && capture.id !== selected.id && capture.kind === selected.kind
+      && capture.repository.path === selected.repository.path,
+  );
+
+  const importCapture = async () => {
+    if (!repository || !file) return;
+    setLoading(true); setError(""); setComparison(null);
+    try {
+      if (file.size > 25_000_000) throw new Error("Runtime artifact exceeds the 25 MB import limit");
+      const capture = await api.importRuntimeCapture({
+        repository_path: repository.path,
+        filename: file.name,
+        content: await file.text(),
+        kind,
+        build_mode: buildMode,
+        flutter_version: flutterVersion || undefined,
+        devtools_version: devtoolsVersion || undefined,
+        label: label || undefined,
+      });
+      setCaptures((current) => [capture, ...current.filter((item) => item.id !== capture.id)]);
+      setSelectedId(capture.id);
+      setFile(null); setLabel("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Runtime artifact import failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const compare = async () => {
+    if (!selected || !baselineId) return;
+    setLoading(true); setError("");
+    try {
+      setComparison(await api.compareRuntimeCaptures(baselineId, selected.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Runtime comparison failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="page runtime-page">
+      <PageHeading
+        eyebrow="Observed performance"
+        title="Import real Flutter runtime evidence."
+        description="Analyze exported profile artifacts and compare captures. Perfora reports measured events and deltas—never an invented overall performance score."
+      />
+      {error && <Notice tone="danger" title="Runtime evidence">{error}</Notice>}
+      <div className="runtime-import-card">
+        <div className="runtime-import-heading"><div><p className="eyebrow">Artifact import</p><h2>Preserve capture provenance</h2></div><span><LockKeyhole size={15} /> Parsed locally</span></div>
+        <div className="runtime-import-grid">
+          <label>Repository<select aria-label="Runtime repository" value={repository?.path ?? ""} onChange={(event) => { const project = projects.find((item) => item.path === event.target.value); if (project) onSelectRepository(project); }}><option value="">Select a saved repository</option>{projects.map((project) => <option key={project.path} value={project.path}>{project.name} · {project.path}</option>)}</select></label>
+          <label>Artifact type<select aria-label="Runtime artifact type" value={kind} onChange={(event) => setKind(event.target.value as RuntimeArtifactKind)}>{Object.entries(runtimeKindLabels).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label>
+          <label>Build mode<select aria-label="Runtime build mode" value={buildMode} onChange={(event) => setBuildMode(event.target.value as RuntimeBuildMode)}>{["profile", "release", "debug", "unknown"].map((value) => <option key={value} value={value}>{value}</option>)}</select><small>Runtime timings require profile mode. Release is trusted only for app-size artifacts.</small></label>
+          <label>Capture label<input aria-label="Runtime capture label" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Checkout flow — before" /></label>
+          <label>Flutter version<input aria-label="Runtime Flutter version" value={flutterVersion} onChange={(event) => setFlutterVersion(event.target.value)} placeholder="From capture metadata when available" /></label>
+          <label>DevTools version<input aria-label="Runtime DevTools version" value={devtoolsVersion} onChange={(event) => setDevtoolsVersion(event.target.value)} placeholder="From capture metadata when available" /></label>
+          <label className="runtime-file-input">Artifact file<input aria-label="Runtime artifact file" type="file" accept=".json,.har,application/json" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><span>{file ? `${file.name} · ${(file.size / 1024).toFixed(1)} KiB` : "DevTools JSON, TimelineSummary JSON, analyze-size JSON, or HAR"}</span></label>
+        </div>
+        <button className="button primary" disabled={!repository || !file || loading} onClick={() => void importCapture()}>{loading ? <LoaderCircle className="spin" /> : <Upload />} Import evidence</button>
+      </div>
+
+      <div className="runtime-layout">
+        <aside className="runtime-capture-list">
+          <div className="panel-heading"><div><p className="eyebrow">Capture history</p><h2>Artifacts</h2></div><span>{captures.length}</span></div>
+          {captures.length === 0 ? <div className="panel-empty"><Activity /><strong>No runtime captures imported</strong></div> : captures.map((capture) => <button key={capture.id} className={selected?.id === capture.id ? "runtime-capture-row selected" : "runtime-capture-row"} onClick={() => { setSelectedId(capture.id); setComparison(null); setBaselineId(""); }}><span className={`runtime-reliability ${capture.reliability}`} /> <div><strong>{capture.label}</strong><span>{runtimeKindLabels[capture.kind]}</span><small>{capture.provenance.build_mode} · {new Date(capture.created_at).toLocaleString()}</small></div><em>{capture.findings.length}</em></button>)}
+        </aside>
+        <div className="runtime-detail">
+          {!selected ? <EmptyState icon={Activity} title="No capture selected" description="Import a Flutter or DevTools performance artifact to inspect observed evidence." /> : <>
+            <div className="runtime-detail-header"><div><p className="eyebrow">{runtimeKindLabels[selected.kind]}</p><h2>{selected.label}</h2><span>{selected.provenance.artifact_format} · {selected.provenance.filename}</span></div><span className={`reliability-pill ${selected.reliability}`}>{selected.reliability}</span></div>
+            <div className="runtime-provenance"><span><strong>Build mode</strong>{selected.provenance.build_mode} ({selected.provenance.build_mode_source})</span><span><strong>Flutter</strong>{selected.provenance.flutter_version ?? "not recorded"}</span><span><strong>DevTools</strong>{selected.provenance.devtools_version ?? "not recorded"}</span><span><strong>Artifact hash</strong>{selected.provenance.sha256.slice(0, 22)}…</span></div>
+            {selected.warnings.map((warning) => <Notice key={warning} tone="warning" title="Evidence reliability">{warning}</Notice>)}
+            <div className="runtime-metrics">{Object.entries(selected.metrics).map(([metric, value]) => <div key={metric}><span>{readableMetric(metric)}</span><strong>{formatRuntimeValue(value, selected.metric_units[metric])}</strong></div>)}</div>
+            <div className="runtime-comparison"><div><p className="eyebrow">Before / after</p><strong>Compare equivalent captures</strong></div><select aria-label="Runtime comparison baseline" value={baselineId} onChange={(event) => setBaselineId(event.target.value)}><option value="">Select baseline</option>{compatibleBaselines.map((capture) => <option value={capture.id} key={capture.id}>{capture.label} · {new Date(capture.created_at).toLocaleString()}</option>)}</select><button className="button secondary" disabled={!baselineId || loading} onClick={() => void compare()}>Compare</button></div>
+            {comparison && <div className="runtime-deltas"><div className="runtime-delta-summary"><strong>{comparison.compatible ? "Comparable evidence" : "Incompatible captures"}</strong><span>{comparison.new_finding_rule_ids.length} new · {comparison.resolved_finding_rule_ids.length} resolved runtime signals</span></div>{comparison.warnings.map((warning) => <p key={warning}>{warning}</p>)}{comparison.metric_deltas.map((delta) => <div className={`runtime-delta ${delta.direction}`} key={delta.metric}><span>{readableMetric(delta.metric)}</span><strong>{formatRuntimeValue(delta.baseline, delta.unit)} → {formatRuntimeValue(delta.current, delta.unit)}</strong><em>{delta.delta > 0 ? "+" : ""}{formatRuntimeValue(delta.delta, delta.unit)}{delta.percent_change == null ? "" : ` (${delta.percent_change > 0 ? "+" : ""}${delta.percent_change.toFixed(1)}%)`}</em></div>)}</div>}
+            <div className="runtime-findings"><p className="eyebrow">Observed runtime findings</p>{selected.findings.length === 0 ? <p>No threshold finding was produced from this artifact. Review coverage and reliability before interpreting this as healthy performance.</p> : selected.findings.map((finding) => <article key={finding.id}><div><span className={`severity-pill ${finding.severity}`}>{finding.severity}</span><strong>{finding.title}</strong><code>{finding.rule_id}@{finding.rule_version}</code></div><p>{finding.explanation}</p><p><strong>Recommendation:</strong> {finding.recommendation}</p><div className="runtime-evidence-links">{finding.evidence_ids.map((evidenceId) => { const evidence = selected.evidence.find((item) => item.id === evidenceId); return evidence ? <span key={evidence.id}><Activity size={14} /><strong>{evidence.name}</strong><code>{evidence.trace_reference}</code>{evidence.value != null && <em>{formatRuntimeValue(evidence.value, evidence.unit)}</em>}{evidence.source_file && <small>{evidence.source_file}{evidence.source_line ? `:${evidence.source_line}` : ""}</small>}</span> : null; })}</div></article>)}</div>
+            {Object.entries(selected.breakdowns).map(([name, items]) => <div className="runtime-breakdown" key={name}><p className="eyebrow">{readableMetric(name)}</p>{items.map((item) => <div key={`${item.name}-${item.trace_reference}`}><span>{item.name}</span><strong>{formatRuntimeValue(item.value, item.unit)}</strong></div>)}</div>)}
+          </>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function readableMetric(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatRuntimeValue(value: number, unit?: string) {
+  if (unit === "bytes") {
+    const absolute = Math.abs(value);
+    if (absolute >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MiB`;
+    if (absolute >= 1024) return `${(value / 1024).toFixed(2)} KiB`;
+    return `${value.toFixed(0)} B`;
+  }
+  if (unit === "ms") return `${value.toFixed(2)} ms`;
+  if (unit === "us") return `${value.toFixed(0)} μs`;
+  if (unit === "percent_samples") return `${value.toFixed(1)}% samples`;
+  if (unit === "count") return value.toFixed(0);
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
 function SettingsView({ setup, onRefresh }: { setup: SetupStatus | null; onRefresh: () => void }) {
+  const openAIFormRef = useRef<HTMLFormElement>(null);
+  const [providerSettings, setProviderSettings] = useState<ProviderSettingsSnapshot | null>(null);
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState("");
+  const [saving, setSaving] = useState<"openai" | "ollama" | "clear" | null>(null);
+  const [message, setMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+
+  const refreshProviderSettings = useCallback(async () => {
+    try {
+      const snapshot = await api.providerSettings();
+      setProviderSettings(snapshot);
+      setOllamaBaseUrl(snapshot.ollama.base_url);
+    } catch (error) {
+      setMessage({ tone: "error", text: error instanceof Error ? error.message : "Provider settings could not be loaded" });
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshProviderSettings();
+  }, [refreshProviderSettings]);
+
+  async function saveOpenAIKey(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const key = String(new FormData(event.currentTarget).get("openai_api_key") ?? "");
+    if (!key) {
+      setMessage({ tone: "error", text: "Enter an OpenAI API key before saving." });
+      return;
+    }
+    setSaving("openai");
+    setMessage(null);
+    try {
+      const result = await api.updateProviderSettings({ openai_api_key: key });
+      setProviderSettings(result.settings);
+      openAIFormRef.current?.reset();
+      setMessage({ tone: "success", text: "OpenAI key saved. Provider availability has been refreshed." });
+      onRefresh();
+    } catch (error) {
+      setMessage({ tone: "error", text: error instanceof Error ? error.message : "OpenAI key could not be saved" });
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function clearOpenAIKey() {
+    setSaving("clear");
+    setMessage(null);
+    try {
+      const result = await api.updateProviderSettings({ clear_openai_api_key: true });
+      setProviderSettings(result.settings);
+      openAIFormRef.current?.reset();
+      setMessage({ tone: "success", text: result.settings.openai.configured ? "Settings key removed. The environment-provided key remains active." : "OpenAI key removed." });
+      onRefresh();
+    } catch (error) {
+      setMessage({ tone: "error", text: error instanceof Error ? error.message : "OpenAI key could not be removed" });
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function saveOllama(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving("ollama");
+    setMessage(null);
+    try {
+      const result = await api.updateProviderSettings({ ollama_base_url: ollamaBaseUrl });
+      setProviderSettings(result.settings);
+      setOllamaBaseUrl(result.settings.ollama.base_url);
+      setMessage({ tone: "success", text: "Ollama endpoint saved. Provider availability has been refreshed." });
+      onRefresh();
+    } catch (error) {
+      setMessage({ tone: "error", text: error instanceof Error ? error.message : "Ollama endpoint could not be saved" });
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  function testConnections() {
+    setMessage(null);
+    onRefresh();
+    void refreshProviderSettings();
+  }
+
   return (
     <section className="page">
-      <PageHeading eyebrow="Local control plane" title="Providers, privacy, and policy." description="Credentials stay in their native local stores. Perfora records configuration metadata, never secret values." action={<button className="button secondary" onClick={onRefresh}><RefreshCw size={16} /> Test connections</button>} />
+      <PageHeading eyebrow="Local control plane" title="Providers, privacy, and policy." description="Add your own provider credentials here. Secrets are write-only in the browser, stored in Perfora's ignored local settings file, and never returned by the API." action={<button className="button secondary" onClick={testConnections}><RefreshCw size={16} /> Test connections</button>} />
       <div className="settings-grid">
         <div className="settings-main">
+          <SectionTitle title="Provider configuration" subtitle="Saved locally for this Perfora installation" />
+          <article className="provider-settings-card">
+            <div className="provider-settings-heading"><div className="provider-logo openai"><Sparkles /></div><div><strong>OpenAI API key</strong><span>{providerSettings?.openai.configured ? `Configured from ${providerSettings.openai.source}` : "Not configured"}</span></div><StatusPill ready={providerSettings?.openai.configured ?? false} label={providerSettings?.openai.configured ? "Configured" : "Required"} /></div>
+            <p>Paste your own key. Perfora will not display it again after it is saved.</p>
+            <form ref={openAIFormRef} className="provider-settings-form" onSubmit={saveOpenAIKey}>
+              <label><span>API key</span><input name="openai_api_key" type="password" autoComplete="off" placeholder="Paste an OpenAI project API key" aria-label="OpenAI API key" /></label>
+              <button className="button primary" disabled={saving !== null}>{saving === "openai" ? <LoaderCircle className="spin" /> : <KeyRound />} Save OpenAI key</button>
+              {providerSettings?.openai.configured && <button className="button secondary danger" type="button" disabled={saving !== null} onClick={() => void clearOpenAIKey()}>{saving === "clear" ? <LoaderCircle className="spin" /> : <X />} Remove saved key</button>}
+            </form>
+          </article>
+          <article className="provider-settings-card">
+            <div className="provider-settings-heading"><div className="provider-logo ollama"><Box /></div><div><strong>Ollama endpoint</strong><span>{providerSettings ? `${providerSettings.ollama.source} · ${providerSettings.ollama.locality}` : "Loading configuration"}</span></div></div>
+            <p>Use a loopback URL for local models, or configure a remote Ollama server explicitly.</p>
+            <form className="provider-settings-form" onSubmit={saveOllama}>
+              <label><span>Base URL</span><input type="url" value={ollamaBaseUrl} onChange={(event) => setOllamaBaseUrl(event.target.value)} placeholder="http://127.0.0.1:11434" required aria-label="Ollama base URL" /></label>
+              <button className="button primary" disabled={saving !== null || !ollamaBaseUrl}>{saving === "ollama" ? <LoaderCircle className="spin" /> : <RefreshCw />} Save Ollama endpoint</button>
+            </form>
+            {providerSettings?.ollama.locality === "remote" && <div className="provider-remote-warning"><CircleAlert size={15} /><span>This endpoint is remote. Perfora will require explicit source-sharing consent before an audit can use its models.</span></div>}
+          </article>
+          {message && <div className={`settings-message ${message.tone}`} role="status">{message.tone === "success" ? <CircleCheck size={16} /> : <CircleAlert size={16} />}<span>{message.text}</span></div>}
           <SectionTitle title="Model providers" subtitle="Dynamic discovery, explicit selection" />
           {(setup?.providers ?? []).map((provider) => <div className="setting-row" key={provider.provider}><div className={`provider-logo ${provider.provider}`}>{provider.provider === "openai" ? <Sparkles /> : provider.provider === "ollama" ? <Box /> : <TerminalSquare />}</div><div><strong>{providerNames[provider.provider]}</strong><span>{provider.detail}</span></div><div className="setting-row-tail"><StatusPill ready={provider.available} /><span>{provider.models.length} models</span></div></div>)}
           <SectionTitle title="Evidence policy" subtitle="Trust boundaries are explicit" />
@@ -1095,7 +1439,7 @@ function SettingsView({ setup, onRefresh }: { setup: SetupStatus | null; onRefre
           <div className="privacy-illustration"><ShieldCheck size={38} /><span className="orbit one" /><span className="orbit two" /></div>
           <p className="eyebrow">Privacy posture</p><h2>Zero automatic telemetry.</h2><p>Repository contents, prompts, responses, and audit logs remain local except for evidence explicitly approved for a remote model.</p>
           <ul><li><Check /> Secrets redacted before model context</li><li><Check /> Unknown routing treated as remote</li><li><Check /> Context manifest saved per audit</li><li><Check /> No silent provider fallback</li></ul>
-          <div className="key-status"><KeyRound size={17} /><div><strong>OpenAI credential</strong><span>{setup?.providers.find((provider) => provider.provider === "openai")?.available ? "Configured in local environment" : "Not configured"}</span></div></div>
+          <div className="key-status"><KeyRound size={17} /><div><strong>OpenAI credential</strong><span>{providerSettings?.openai.configured ? `Configured from ${providerSettings.openai.source}` : "Not configured"}</span></div></div>
         </aside>
       </div>
     </section>
@@ -1127,7 +1471,7 @@ function EmptyState({ icon: Icon, title, description, action }: { icon: typeof A
 }
 
 function ExportMenu({ audit }: { audit: AuditRecord }) {
-  return <div className="export-group"><Download size={16} />{(["html", "json", "sarif", "cyclonedx"] as const).map((format) => <a key={format} href={`/api/audits/${audit.id}/export?format=${format}`} download>{format === "cyclonedx" ? "SBOM" : format.toUpperCase()}</a>)}</div>;
+  return <div className="export-group"><Download size={16} />{(["html", "json", "sarif", "cyclonedx", "evidence"] as const).map((format) => <a key={format} href={`/api/audits/${audit.id}/export?format=${format}`} download>{format === "cyclonedx" ? "SBOM" : format === "evidence" ? "Evidence ZIP" : format.toUpperCase()}</a>)}</div>;
 }
 
 async function writeClipboard(value: string) {

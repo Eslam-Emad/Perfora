@@ -1,16 +1,68 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
+import io
 import json
+import zipfile
 from datetime import UTC, datetime
 
 from . import __version__
 from .ci_report import export_cyclonedx
 from .domain import AuditRecord
+from .security import redact_secrets
 
 
 def export_json(audit: AuditRecord) -> str:
     return audit.model_dump_json(indent=2)
+
+
+def export_evidence_package(audit: AuditRecord, signing_key: str | None = None) -> bytes:
+    """Create a redacted, checksummed ZIP with an optional HMAC authenticity signature."""
+    redacted_audit = AuditRecord.model_validate(_redact_value(audit.model_dump(mode="json")))
+    artifacts = {
+        "audit.json": export_json(redacted_audit).encode(),
+        "report.html": export_html(redacted_audit).encode(),
+        "results.sarif.json": export_sarif(redacted_audit).encode(),
+        "dependencies.cdx.json": export_audit_cyclonedx(redacted_audit).encode(),
+    }
+    manifest = {
+        "schema_version": 1,
+        "audit_id": audit.id,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "redacted": True,
+        "files": {
+            name: {"sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
+            for name, content in artifacts.items()
+        },
+    }
+    signature_payload = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    manifest["signature"] = (
+        {
+            "algorithm": "hmac-sha256",
+            "value": hmac.new(signing_key.encode(), signature_payload, hashlib.sha256).hexdigest(),
+        }
+        if signing_key
+        else {"algorithm": "none", "value": None}
+    )
+    artifacts["manifest.json"] = json.dumps(manifest, indent=2).encode()
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name in sorted(artifacts):
+            archive.writestr(name, artifacts[name])
+    return output.getvalue()
+
+
+def _redact_value(value):
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    return value
 
 
 def export_audit_cyclonedx(audit: AuditRecord) -> str:
@@ -81,9 +133,7 @@ def export_sarif(audit: AuditRecord) -> str:
                     latest_verification.outcome.value if latest_verification else None
                 ),
                 "verificationCompletedAt": (
-                    latest_verification.completed_at.isoformat()
-                    if latest_verification
-                    else None
+                    latest_verification.completed_at.isoformat() if latest_verification else None
                 ),
                 "controlGroup": finding.control_group,
                 "platforms": finding.platforms,
@@ -125,26 +175,34 @@ def export_html(audit: AuditRecord) -> str:
           <h2>{html.escape(finding.title)}</h2>
           <p><code>{html.escape(finding.file)}:{finding.line}</code></p>
           <p><strong>Triage:</strong> {html.escape(finding.triage_status.value)} ·
-          <strong>Change:</strong> {html.escape(finding.comparison_status.value if finding.comparison_status else "not classified")} ·
+          <strong>Change:</strong> {
+            html.escape(
+                finding.comparison_status.value if finding.comparison_status else "not classified"
+            )
+        } ·
           <strong>Owner:</strong> {html.escape(finding.owner or "unassigned")}</p>
           <p><strong>Latest verification:</strong> {
             html.escape(finding.verification_attempts[-1].outcome.value)
             if finding.verification_attempts
             else "not run"
-          }</p>
+        }</p>
           <p>{html.escape(finding.explanation)}</p>
           {
             f'''<h3>Standards mapping</h3>
           <p>{html.escape(finding.control_group or "Unmapped")} · {
-            html.escape(", ".join(item.id for item in finding.standards) or "No references")
-          }</p>
+                html.escape(", ".join(item.id for item in finding.standards) or "No references")
+            }</p>
           <h3>Detection limitations</h3>
-          <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in finding.detection_limitations)}</ul>
+          <ul>{
+                "".join(f"<li>{html.escape(item)}</li>" for item in finding.detection_limitations)
+            }</ul>
           <h3>Manual verification</h3>
-          <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in finding.manual_verification)}</ul>'''
+          <ul>{
+                "".join(f"<li>{html.escape(item)}</li>" for item in finding.manual_verification)
+            }</ul>'''
             if finding.control_group
             else ""
-          }
+        }
           <h3>Evidence</h3>
           <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in finding.evidence)}</ul>
           <h3>Deterministic recommendation</h3>

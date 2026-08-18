@@ -1,0 +1,22 @@
+{
+  "metadata": {"buildMode": "profile"},
+  "traceEvents": [
+    {
+      "ph": "X",
+      "name": "Flutter.Frame",
+      "cat": "UI",
+      "ts": 1000,
+      "dur": 28000,
+      "tid": "ui",
+      "args": {"file": "lib/checkout.dart", "lineNumber": 27}
+    },
+    {
+      "ph": "X",
+      "name": "Rasterizer::Draw",
+      "cat": "Raster",
+      "ts": 30000,
+      "dur": 9000,
+      "tid": "raster"
+    }
+  ]
+}

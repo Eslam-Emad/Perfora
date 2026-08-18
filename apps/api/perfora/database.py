@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-from .domain import AuditRecord
+from .domain import AuditRecord, RuntimeCapture
 
 
 def _create_initial_schema(connection: sqlite3.Connection) -> None:
@@ -25,8 +25,29 @@ def _create_initial_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_runtime_capture_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_captures (
+            id TEXT PRIMARY KEY,
+            repository_path TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS runtime_captures_repository_idx
+        ON runtime_captures(repository_path, created_at DESC)
+        """
+    )
+
+
 MIGRATIONS: tuple[tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
     (1, _create_initial_schema),
+    (2, _create_runtime_capture_schema),
 )
 DATABASE_SCHEMA_VERSION = MIGRATIONS[-1][0]
 
@@ -104,3 +125,47 @@ class AuditStore:
                 "SELECT payload FROM audits ORDER BY updated_at DESC"
             ).fetchall()
         return [AuditRecord.model_validate(json.loads(row[0])) for row in rows]
+
+    def save_runtime_capture(self, capture: RuntimeCapture) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_captures(id, repository_path, kind, payload, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    repository_path = excluded.repository_path,
+                    kind = excluded.kind,
+                    payload = excluded.payload,
+                    created_at = excluded.created_at
+                """,
+                (
+                    capture.id,
+                    capture.repository.path,
+                    capture.kind.value,
+                    capture.model_dump_json(),
+                    capture.created_at.isoformat(),
+                ),
+            )
+
+    def get_runtime_capture(self, capture_id: str) -> RuntimeCapture | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM runtime_captures WHERE id = ?", (capture_id,)
+            ).fetchone()
+        return RuntimeCapture.model_validate(json.loads(row[0])) if row else None
+
+    def list_runtime_captures(self, repository_path: str | None = None) -> list[RuntimeCapture]:
+        with self._lock, self._connect() as connection:
+            if repository_path:
+                rows = connection.execute(
+                    """
+                    SELECT payload FROM runtime_captures
+                    WHERE repository_path = ? ORDER BY created_at DESC
+                    """,
+                    (repository_path,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT payload FROM runtime_captures ORDER BY created_at DESC"
+                ).fetchall()
+        return [RuntimeCapture.model_validate(json.loads(row[0])) for row in rows]
